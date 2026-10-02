@@ -74,9 +74,18 @@ enum SecurityAuditParser {
         var findings: [String] = []
         var state: HealthState = snapshot.available ? .online : .warning
 
+        func rank(_ value: HealthState) -> Int {
+            switch value {
+            case .unknown: return 0
+            case .online: return 1
+            case .warning: return 2
+            case .critical: return 3
+            case .offline: return 4
+            }
+        }
+
         func escalate(_ next: HealthState) {
-            let rank: [HealthState: Int] = [.unknown: 0, .online: 1, .warning: 2, .critical: 3, .offline: 4]
-            if (rank[next] ?? 0) > (rank[state] ?? 0) { state = next }
+            if rank(next) > rank(state) { state = next }
         }
 
         if !snapshot.available {
@@ -159,7 +168,7 @@ enum SecurityAuditParser {
         cleanWireGuardPort: Int?,
         wireGuardAll: String,
         openVPNBinds: String
-    ) -> (public: [SecurityListener], private: [SecurityListener]) {
+    ) -> (publicItems: [SecurityListener], privateItems: [SecurityListener]) {
         let wgPorts = wireGuardPorts(wireGuardAll)
         let ovpnPorts = openVPNPorts(openVPNBinds)
 
