@@ -75,15 +75,14 @@ final class AppViewModel: ObservableObject {
         showOnboarding = !initialSettings.completedOnboarding
         system.macLANIP = LocalNetworkService.lanIPv4()
         localProfiles = ProfileStore.list()
-        Task { diagnostics = await history.load() }
-        Task { activity = await activityStore.load() }
-        Task { await loadMonitoringHistory() }
         if let data = UserDefaults.standard.data(forKey: "servers") { servers = ((try? JSONDecoder().decode([ServerProfile].self, from: data)) ?? []).map { var value=$0;value.keyPath=KeychainService.load(account:"ssh-key-path-\(value.id.uuidString)") ?? "";return value } }
         activeServerID = UserDefaults.standard.string(forKey: "activeServerID").flatMap(UUID.init)
         loadServerScopedState()
         updateFleet()
-        Task { await loadBaseline() }
         configureDefaultAlerts()
+        Task { diagnostics = await history.load() }
+        Task { activity = await activityStore.load() }
+        Task { await loadMonitoringHistory(); await loadBaseline() }
     }
 
     var configuration: SSHConfiguration { SSHConfiguration(host: settings.host, username: settings.username, keyPath: NSString(string: settings.keyPath).expandingTildeInPath, timeout: 8, port: settings.port) }
@@ -527,7 +526,7 @@ final class AppViewModel: ObservableObject {
     }
 
     func loadMonitoringHistory() async {
-        if let nodeID=activeServerID,let profile=servers.first(where:{$0.id==nodeID}),let persistenceStore { let node=LegacyModelAdapter.node(from:profile);try? await persistenceStore.upsert(node:node);_=try? await LegacyMonitoringImporter().importHistory(for:node,into:persistenceStore);try? await LegacyTelemetryImporter().importHistory(for:node,into:persistenceStore);monitoringSamples=(try? await persistenceStore.samples(nodeID:nodeID)) ?? [];let stored=(try? await persistenceStore.events(nodeID:nodeID)) ?? [];monitoringEvents=stored.map{MonitoringEvent(id:$0.id,timestamp:$0.timestamp,component:$0.componentID,title:$0.title,detail:$0.detail,state:$0.state,recovered:$0.isRecovery)};peerHistory=(try? await persistenceStore.peerHistory(nodeID:nodeID)) ?? [];adGuardHistory=(try? await persistenceStore.adGuardHistory(nodeID:nodeID)) ?? [];let saved=(try? await persistenceStore.alertRules(nodeID:nodeID)) ?? [];let legacy=(try? await LegacyAlertImporter().rules(for:node)) ?? [];let defaults=AlertEngine.defaultRules(nodeID:nodeID,peerTimeout:settings.handshakeTimeout);let imported=saved.isEmpty ? legacy:saved;let byKind=Dictionary(uniqueKeysWithValues:imported.map{($0.kind,$0)});alertRules=defaults.map{byKind[$0.kind] ?? $0};alertStates=(try? await persistenceStore.alertStates(nodeID:nodeID)) ?? [:];try? await persistenceStore.save(alertRules:alertRules,nodeID:nodeID) } else { monitoringSamples=await monitoringStore.loadSamples(host:settings.host);monitoringEvents=await monitoringStore.loadEvents(host:settings.host) }
+        if let nodeID=activeServerID,let profile=servers.first(where:{$0.id==nodeID}),let persistenceStore { let node=LegacyModelAdapter.node(from:profile);try? await persistenceStore.upsert(node:node);_=try? await LegacyMonitoringImporter().importHistory(for:node,into:persistenceStore);try? await LegacyTelemetryImporter().importHistory(for:node,into:persistenceStore);monitoringSamples=(try? await persistenceStore.samples(nodeID:nodeID)) ?? [];let stored=(try? await persistenceStore.events(nodeID:nodeID)) ?? [];monitoringEvents=stored.filter{$0.kind=="monitoring"}.map{MonitoringEvent(id:$0.id,timestamp:$0.timestamp,component:$0.componentID,title:$0.title,detail:$0.detail,state:$0.state,recovered:$0.isRecovery)};alertEvents=stored.filter{$0.kind=="alert"};peerHistory=(try? await persistenceStore.peerHistory(nodeID:nodeID)) ?? [];adGuardHistory=(try? await persistenceStore.adGuardHistory(nodeID:nodeID)) ?? [];let saved=(try? await persistenceStore.alertRules(nodeID:nodeID)) ?? [];let legacy=(try? await LegacyAlertImporter().rules(for:node)) ?? [];let defaults=AlertEngine.defaultRules(nodeID:nodeID,peerTimeout:settings.handshakeTimeout);let imported=saved.isEmpty ? legacy:saved;let byKind=Dictionary(uniqueKeysWithValues:imported.map{($0.kind,$0)});alertRules=defaults.map{byKind[$0.kind] ?? $0};alertStates=(try? await persistenceStore.alertStates(nodeID:nodeID)) ?? [:];try? await persistenceStore.save(alertRules:alertRules,nodeID:nodeID) } else { monitoringSamples=await monitoringStore.loadSamples(host:settings.host);monitoringEvents=await monitoringStore.loadEvents(host:settings.host) }
         rebuildIncidents()
     }
 
@@ -540,6 +539,7 @@ final class AppViewModel: ObservableObject {
             .map { "\($0.protocolName.lowercased()):\($0.port)" })).sorted()
 
         let sample = MonitoringSample(
+            nodeID: activeServerID ?? LegacyNodeIdentity.unassigned,
             id: UUID(),
             timestamp: Date(),
             cpuPercent: system.cpuPercent,
@@ -554,22 +554,20 @@ final class AppViewModel: ObservableObject {
             publicListeners: publicListeners
         )
 
-        let result = await monitoringStore.record(host: settings.host, sample: sample)
-        monitoringSamples = result.samples
-        monitoringEvents = result.events
-        if let nodeID=activeServerID,let persistenceStore { try? await persistenceStore.insert(sample:sample,nodeID:nodeID); for event in result.newEvents { try? await persistenceStore.insert(event:LegacyModelAdapter.event(from:event,nodeID:nodeID)) } }
+        if let nodeID=activeServerID,let persistenceStore {
+            let newEvents=MonitoringEventBuilder.events(from:monitoringSamples.last,to:sample)
+            try? await persistenceStore.insert(sample:sample,nodeID:nodeID)
+            for event in newEvents { try? await persistenceStore.insert(event:LegacyModelAdapter.event(from:event,nodeID:nodeID)) }
+            monitoringSamples=(try? await persistenceStore.samples(nodeID:nodeID)) ?? monitoringSamples
+            let stored=(try? await persistenceStore.events(nodeID:nodeID)) ?? []
+            monitoringEvents=stored.filter{$0.kind=="monitoring"}.map{MonitoringEvent(id:$0.id,timestamp:$0.timestamp,component:$0.componentID,title:$0.title,detail:$0.detail,state:$0.state,recovered:$0.isRecovery)}
+        } else {
+            let result=await monitoringStore.record(host:settings.host,sample:sample)
+            monitoringSamples=result.samples;monitoringEvents=result.events
+        }
         if let nodeID=activeServerID,let persistenceStore,lastPeerHistorySample.map({sample.timestamp.timeIntervalSince($0)>=30}) ?? true { for peer in wireGuard.peers { try? await persistenceStore.insert(peer:PeerHistorySample(nodeID:nodeID,id:UUID(),timestamp:sample.timestamp,peerID:peer.id,name:peer.name,vpnIP:peer.vpnIP,status:peer.status,receivedBytes:peer.receivedBytes,sentBytes:peer.sentBytes,latestHandshake:peer.latestHandshake)) };peerHistory=(try? await persistenceStore.peerHistory(nodeID:nodeID)) ?? peerHistory;lastPeerHistorySample=sample.timestamp }
         rebuildIncidents()
 
-        if settings.notificationsEnabled {
-            for event in result.newEvents {
-                NotificationService.send(
-                    title: event.title,
-                    body: event.detail,
-                    id: "tunneldeck-\(settings.host)-\(event.component)-\(event.state.rawValue)"
-                )
-            }
-        }
     }
 
     private func monitoredUnitState(where predicate: (UnitStatus) -> Bool) -> HealthState {
@@ -587,7 +585,7 @@ final class AppViewModel: ObservableObject {
     func setCurrentBaseline() async { guard let nodeID = activeServerID else { return }; let baseline = currentBaseline(nodeID); if let profile = servers.first(where: { $0.id == nodeID }), let persistenceStore { try? await persistenceStore.upsert(node: LegacyModelAdapter.node(from: profile)); try? await persistenceStore.save(baseline: baseline) }; configurationBaseline = baseline; baselineDrift = []; evaluateAlerts() }
     func loadBaseline() async { guard let nodeID = activeServerID, let persistenceStore else { return }; configurationBaseline = try? await persistenceStore.latestBaseline(nodeID: nodeID); if let configurationBaseline { baselineDrift = BaselineEngine.diff(baseline: configurationBaseline, current: currentBaseline(nodeID)) } }
     private func configureDefaultAlerts() { guard let nodeID = activeServerID, alertRules.isEmpty else { return }; alertRules=AlertEngine.defaultRules(nodeID:nodeID,peerTimeout:settings.handshakeTimeout) }
-    private func evaluateAlerts() { let conditions:[AlertRuleKind:Bool]=[.nodeOffline:system.health == .offline,.wireGuardOffline:system.health == .online && wireGuard.state == .offline,.adGuardOffline:system.health == .online && monitoredUnitState{$0.name.localizedCaseInsensitiveContains("AdGuardHome")} == .offline,.antiZapretOffline:system.health == .online && monitoredUnitState{$0.name == "antizapret.service"} == .offline,.disk:system.diskPercent >= threshold(.disk,90),.memory:system.memoryPercent >= threshold(.memory,90),.ping:(system.pingMilliseconds ?? 0) >= threshold(.ping,250),.publicDNS:exposureEndpoints.contains{$0.port == 53 && $0.classification == .publicInternet},.newPublicListener:baselineDrift.contains{$0.category == "public-listener" && $0.kind == .added},.peerInactive:wireGuard.peers.contains{$0.status == .offline},.configurationDrift:!baselineDrift.isEmpty];let result=AlertEngine.evaluate(rules:alertRules,conditions:conditions,previous:alertStates);alertStates=result.states;alertEvents.append(contentsOf:result.events);if let nodeID=activeServerID,let persistenceStore{Task{try? await persistenceStore.save(alertStates:result.states,nodeID:nodeID)}} }
+    private func evaluateAlerts() { let conditions:[AlertRuleKind:Bool]=[.nodeOffline:system.health == .offline,.wireGuardOffline:system.health == .online && wireGuard.state == .offline,.adGuardOffline:system.health == .online && monitoredUnitState{$0.name.localizedCaseInsensitiveContains("AdGuardHome")} == .offline,.antiZapretOffline:system.health == .online && monitoredUnitState{$0.name == "antizapret.service"} == .offline,.disk:system.diskPercent >= threshold(.disk,90),.memory:system.memoryPercent >= threshold(.memory,90),.ping:(system.pingMilliseconds ?? 0) >= threshold(.ping,250),.publicDNS:exposureEndpoints.contains{$0.port == 53 && $0.classification == .publicInternet},.newPublicListener:baselineDrift.contains{$0.category == "public-listener" && $0.kind == .added},.peerInactive:wireGuard.peers.contains{$0.status == .offline},.configurationDrift:!baselineDrift.isEmpty];let result=AlertEngine.evaluate(rules:alertRules,conditions:conditions,previous:alertStates);alertStates=result.states;alertEvents.append(contentsOf:result.events);if settings.notificationsEnabled{for event in result.events{NotificationService.send(title:event.title,body:event.detail,id:"tunneldeck-alert-\(event.id.uuidString)")}};if let nodeID=activeServerID,let persistenceStore{Task{try? await persistenceStore.save(alertStates:result.states,nodeID:nodeID);for event in result.events{try? await persistenceStore.insert(event:event)}}} }
     private func threshold(_ kind:AlertRuleKind,_ fallback:Double)->Double{alertRules.first{$0.kind==kind}?.threshold ?? fallback}
     func saveAlertRules(){guard let nodeID=activeServerID,let persistenceStore else{return};let rules=alertRules;Task{try? await persistenceStore.save(alertRules:rules,nodeID:nodeID)}}
     func acknowledge(_ id: UUID) { guard var state=alertStates[id] else{return}; state.acknowledgedAt=Date(); alertStates[id]=state;if let nodeID=activeServerID,let persistenceStore{let states=alertStates;Task{try? await persistenceStore.save(alertStates:states,nodeID:nodeID)}} }
