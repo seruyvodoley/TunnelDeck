@@ -1,4 +1,4 @@
-# TunnelDeck 1.2.6
+# TunnelDeck 1.2.8
 
 Native macOS control panel for a self-hosted WireGuard, AntiZapret and AdGuard Home VPS. Built with Swift, SwiftUI and the system OpenSSH client—no Electron, embedded terminal, passwords or private keys in the app bundle.
 
@@ -136,6 +136,15 @@ swift test
 ```
 
 `swift test` requires a full Xcode installation because the suite uses Swift Testing macros. The helper tests use system Python and never connect to a production server.
+
+## 1.2.8 Incident Center and alert rules
+
+- Monitoring events are grouped into incidents with active/recovered state, duration, affected component timeline, 24-hour incident count, VPS downtime and mean recovery time.
+- Dependent service noise remains suppressed while the VPS itself is unavailable; a VPS outage is represented as one connectivity incident instead of multiple false service incidents.
+- Local alert rules control notifications for VPS, WireGuard, AdGuard/AntiZapret, public DNS exposure, new public listeners, disk usage and ping latency.
+- Disk and ping rules support configurable thresholds; all rules use cooldowns to avoid repeated notifications while recovery notifications remain immediate.
+- Alert configuration is stored locally per VPS and does not change server, helper, firewall or router configuration.
+- Server helper compatibility remains 1.2.1.
 
 ## 1.2.6 Monitoring history and event log
 

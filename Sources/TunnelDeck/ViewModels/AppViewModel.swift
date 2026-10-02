@@ -41,6 +41,8 @@ final class AppViewModel: ObservableObject {
     @Published var monitoringSamples: [MonitoringSample] = []
     @Published var monitoringEvents: [MonitoringEvent] = []
     @Published var monitoringWindowHours = 6
+    @Published var monitoringIncidents: [MonitoringIncident] = []
+    @Published var alertRules: [AlertRule] = []
 
     let ssh = SSHService()
     let adGuardAPI = AdGuardAPIService()
@@ -49,6 +51,7 @@ final class AppViewModel: ObservableObject {
     private let history = DiagnosticHistoryStore()
     private let activityStore = ActivityStore()
     private let monitoringStore = MonitoringHistoryStore()
+    private let alertRuleStore = AlertRuleStore()
     private var pollTask: Task<Void, Never>?
     private var previousCPUTicks: (idle: Double, total: Double)?
 
@@ -87,7 +90,7 @@ final class AppViewModel: ObservableObject {
     func selectServer(_ id: UUID) {
         guard let server = servers.first(where: { $0.id == id }) else { return }
         activeServerID = id; UserDefaults.standard.set(id.uuidString, forKey: "activeServerID"); settings.host = server.host; settings.port = server.port; settings.username = server.username; settings.keyPath = server.keyPath
-        system = SystemSnapshot(); wireGuard = WireGuardSnapshot(); units = []; listeners = []; healthReport = nil; security = SecuritySnapshot(); monitoringSamples = []; monitoringEvents = []; loadServerScopedState()
+        system = SystemSnapshot(); wireGuard = WireGuardSnapshot(); units = []; listeners = []; healthReport = nil; security = SecuritySnapshot(); monitoringSamples = []; monitoringEvents = []; monitoringIncidents = []; alertRules = []; loadServerScopedState()
         saveSettings(); Task { await loadMonitoringHistory(); await refresh() }
     }
 
@@ -497,6 +500,22 @@ final class AppViewModel: ObservableObject {
     func loadMonitoringHistory() async {
         monitoringSamples = await monitoringStore.loadSamples(host: settings.host)
         monitoringEvents = await monitoringStore.loadEvents(host: settings.host)
+        monitoringIncidents = IncidentEngine.build(from: monitoringEvents)
+        alertRules = await alertRuleStore.load(host: settings.host)
+    }
+
+    func setAlertRuleEnabled(_ id: UUID, enabled: Bool) {
+        guard let index = alertRules.firstIndex(where: { $0.id == id }) else { return }
+        alertRules[index].enabled = enabled
+        let rules = alertRules
+        Task { await alertRuleStore.save(host: settings.host, rules: rules) }
+    }
+
+    func setAlertRuleThreshold(_ id: UUID, threshold: Double) {
+        guard let index = alertRules.firstIndex(where: { $0.id == id }) else { return }
+        alertRules[index].threshold = threshold
+        let rules = alertRules
+        Task { await alertRuleStore.save(host: settings.host, rules: rules) }
     }
 
     private func recordMonitoringState() async {
@@ -522,18 +541,32 @@ final class AppViewModel: ObservableObject {
             publicListeners: publicListeners
         )
 
+        let previousSample = monitoringSamples.last
         let result = await monitoringStore.record(host: settings.host, sample: sample)
         monitoringSamples = result.samples
         monitoringEvents = result.events
+        monitoringIncidents = IncidentEngine.build(from: monitoringEvents)
 
         if settings.notificationsEnabled {
-            for event in result.newEvents {
+            let lastFired = loadAlertFireTimes()
+            let evaluation = AlertRuleEngine.evaluate(
+                previous: previousSample,
+                current: sample,
+                newEvents: result.newEvents,
+                rules: alertRules,
+                lastFired: lastFired,
+                now: sample.timestamp
+            )
+            var updatedFireTimes = lastFired
+            for trigger in evaluation.triggers {
                 NotificationService.send(
-                    title: event.title,
-                    body: event.detail,
-                    id: "tunneldeck-\(settings.host)-\(event.component)-\(event.state.rawValue)"
+                    title: trigger.title,
+                    body: trigger.detail,
+                    id: "tunneldeck-\(settings.host)-alert-\(trigger.ruleID.uuidString)-\(trigger.recovered)"
                 )
+                if !trigger.recovered { updatedFireTimes[trigger.ruleID.uuidString] = sample.timestamp.timeIntervalSince1970 }
             }
+            saveAlertFireTimes(updatedFireTimes)
         }
     }
 
@@ -541,6 +574,14 @@ final class AppViewModel: ObservableObject {
         guard system.health == .online else { return .unknown }
         guard let unit = units.first(where: predicate) else { return .unknown }
         return unit.activeState == "active" ? .online : .offline
+    }
+
+    private func loadAlertFireTimes() -> [String: Double] {
+        UserDefaults.standard.dictionary(forKey: "alertFireTimes-\(settings.host)") as? [String: Double] ?? [:]
+    }
+
+    private func saveAlertFireTimes(_ values: [String: Double]) {
+        UserDefaults.standard.set(values, forKey: "alertFireTimes-\(settings.host)")
     }
 
     func testSSH() async -> Bool {

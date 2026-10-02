@@ -206,6 +206,46 @@ struct MonitoringRecordResult: Sendable {
     let newEvents: [MonitoringEvent]
 }
 
+struct MonitoringIncident: Identifiable, Sendable {
+    let id: String
+    let component: String
+    let title: String
+    let start: Date
+    var end: Date?
+    let severity: HealthState
+    var affectedComponents: [String]
+    var timeline: [MonitoringEvent]
+
+    var active: Bool { end == nil }
+    func duration(reference: Date = Date()) -> TimeInterval { max(0, (end ?? reference).timeIntervalSince(start)) }
+}
+
+enum AlertRuleKind: String, Codable, CaseIterable, Sendable {
+    case vpsOffline
+    case wireGuardOffline
+    case serviceOffline
+    case publicDNS
+    case newPublicListener
+    case diskPercent
+    case pingMilliseconds
+}
+
+struct AlertRule: Identifiable, Codable, Sendable {
+    let id: UUID
+    let kind: AlertRuleKind
+    let title: String
+    var enabled: Bool
+    var threshold: Double?
+    var cooldownMinutes: Int
+}
+
+struct AlertTrigger: Sendable {
+    let ruleID: UUID
+    let title: String
+    let detail: String
+    let recovered: Bool
+}
+
 struct DiagnosticResult: Identifiable, Codable, Sendable {
     let id: UUID
     let date: Date

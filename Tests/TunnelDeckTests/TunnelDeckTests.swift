@@ -367,3 +367,53 @@ import Testing
     #expect(events.contains { $0.component == "disk" && $0.state == .warning })
     #expect(events.contains { $0.component == "listeners" && $0.detail.contains("tcp:8080") })
 }
+
+@Test func incidentEngineGroupsOutageAndRecovery() {
+    let now = Date()
+    let events = [
+        MonitoringEvent(id: UUID(), timestamp: now, component: "vps", title: "VPS offline", detail: "online → offline", state: .offline, recovered: false),
+        MonitoringEvent(id: UUID(), timestamp: now.addingTimeInterval(90), component: "vps", title: "VPS recovered", detail: "offline → online", state: .online, recovered: true)
+    ]
+    let incidents = IncidentEngine.build(from: events)
+    #expect(incidents.count == 1)
+    #expect(incidents[0].component == "vps")
+    #expect(incidents[0].end == now.addingTimeInterval(90))
+    #expect(!incidents[0].active)
+}
+
+@Test func incidentEngineKeepsPublicListenerIncidentsSeparate() {
+    let now = Date()
+    let events = [
+        MonitoringEvent(id: UUID(), timestamp: now, component: "listeners", title: "New public listener", detail: "tcp:8080", state: .warning, recovered: false),
+        MonitoringEvent(id: UUID(), timestamp: now.addingTimeInterval(10), component: "listeners", title: "New public listener", detail: "udp:9999", state: .warning, recovered: false),
+        MonitoringEvent(id: UUID(), timestamp: now.addingTimeInterval(20), component: "listeners", title: "Public listener removed", detail: "tcp:8080", state: .online, recovered: false)
+    ]
+    let incidents = IncidentEngine.build(from: events)
+    #expect(incidents.count == 2)
+    #expect(incidents.first { $0.id.contains("tcp:8080") }?.end != nil)
+    #expect(incidents.first { $0.id.contains("udp:9999") }?.active == true)
+}
+
+@Test func alertRuleEngineUsesThresholdCrossingAndCooldown() {
+    let now = Date()
+    let rules = [
+        AlertRule(id: UUID(), kind: .diskPercent, title: "Disk usage", enabled: true, threshold: 80, cooldownMinutes: 30),
+        AlertRule(id: UUID(), kind: .pingMilliseconds, title: "High ping", enabled: true, threshold: 100, cooldownMinutes: 30)
+    ]
+    let previous = MonitoringSample(
+        id: UUID(), timestamp: now, cpuPercent: 5, memoryPercent: 10, diskPercent: 70, pingMilliseconds: 50,
+        vpsState: .online, wireGuardState: .online, adGuardState: .online, antiZapretState: .online,
+        publicDNSExposed: false, publicListeners: []
+    )
+    let current = MonitoringSample(
+        id: UUID(), timestamp: now.addingTimeInterval(30), cpuPercent: 5, memoryPercent: 10, diskPercent: 85, pingMilliseconds: 150,
+        vpsState: .online, wireGuardState: .online, adGuardState: .online, antiZapretState: .online,
+        publicDNSExposed: false, publicListeners: []
+    )
+    let evaluation = AlertRuleEngine.evaluate(previous: previous, current: current, newEvents: [], rules: rules, lastFired: [:], now: current.timestamp)
+    #expect(evaluation.triggers.count == 2)
+
+    let last = Dictionary(uniqueKeysWithValues: rules.map { ($0.id.uuidString, current.timestamp.timeIntervalSince1970) })
+    let repeated = AlertRuleEngine.evaluate(previous: current, current: current, newEvents: [], rules: rules, lastFired: last, now: current.timestamp)
+    #expect(repeated.triggers.isEmpty)
+}
