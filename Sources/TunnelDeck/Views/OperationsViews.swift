@@ -61,8 +61,8 @@ struct SecurityView: View {
                 }
                 MetricCard(title: "Public Listeners", icon: "network.badge.shield.half.filled") {
                     VStack(alignment: .leading, spacing: 8) {
-                        if publicListeners.isEmpty { Label("No wildcard listeners detected", systemImage: "checkmark.circle.fill").foregroundStyle(.green) }
-                        ForEach(publicListeners) { listener in HStack { StatusDot(state: listener.port == 53 ? .offline : .warning); Text("\(listener.protocolName) \(listener.address):\(listener.port)"); Spacer(); Text(listener.process).foregroundStyle(.secondary) } }
+                        if publicListeners.isEmpty { Label("No public listeners detected", systemImage: "checkmark.circle.fill").foregroundStyle(.green) }
+                        ForEach(publicListeners) { listener in HStack { StatusDot(state: listener.port == 53 || listener.process.localizedCaseInsensitiveContains("AdGuardHome") ? .critical : .warning); Text("\(listener.protocolName) \(listener.address):\(listener.port)"); Spacer(); Text(listener.process).foregroundStyle(.secondary) } }
                     }
                 }
                 Text("Additional SSH configuration, firewall policy, permissions and failed-login checks require successful SSH discovery.").foregroundStyle(.secondary)
