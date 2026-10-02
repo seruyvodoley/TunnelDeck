@@ -46,6 +46,9 @@ final class AppViewModel: ObservableObject {
     @Published var exposureEndpoints: [NetworkEndpoint] = []
     @Published var configurationBaseline: ConfigurationBaseline?
     @Published var baselineDrift: [ConfigurationDrift] = []
+    @Published var alertRules: [AlertRule] = []
+    @Published var alertStates: [UUID: AlertRuntimeState] = [:]
+    @Published var alertEvents: [InfrastructureEvent] = []
 
     let ssh = SSHService()
     let adGuardAPI = AdGuardAPIService()
@@ -76,6 +79,7 @@ final class AppViewModel: ObservableObject {
         loadServerScopedState()
         updateFleet()
         Task { await loadBaseline() }
+        configureDefaultAlerts()
     }
 
     var configuration: SSHConfiguration { SSHConfiguration(host: settings.host, username: settings.username, keyPath: NSString(string: settings.keyPath).expandingTildeInPath, timeout: 8, port: settings.port) }
@@ -412,6 +416,7 @@ final class AppViewModel: ObservableObject {
             exposureEndpoints = ExposureAnalyzer.analyze(listeners: parsedListeners, nodeID: nodeID, publicAddresses: Set([settings.host, system.publicIPv4, system.publicIPv6].filter { !$0.isEmpty && $0 != "—" }), vpnAddresses: Set([wireGuard.address.split(separator: "/").first.map(String.init) ?? ""].filter { !$0.isEmpty }), firewallEvidence: values.5.stdout, serviceNames: names)
         } else { exposureEndpoints = [] }
         if let configurationBaseline, let nodeID = activeServerID { baselineDrift = BaselineEngine.diff(baseline: configurationBaseline, current: currentBaseline(nodeID)) }
+        evaluateAlerts()
         updateFleet()
     }
 
@@ -566,14 +571,17 @@ final class AppViewModel: ObservableObject {
         return unit.activeState == "active" ? .online : .offline
     }
 
-    private func rebuildIncidents() { guard let nodeID = activeServerID else { incidents = []; return }; incidents = IncidentEngine.incidents(events: monitoringEvents, nodeID: nodeID); updateFleet() }
+    private func rebuildIncidents() { guard let nodeID = activeServerID else { incidents = []; return }; incidents = IncidentEngine.incidents(events: monitoringEvents, nodeID: nodeID); evaluateAlerts(); updateFleet() }
 
     var activeNodeName: String { servers.first(where: { $0.id == activeServerID })?.name ?? (system.hostname == "—" ? "VPS" : system.hostname) }
     func updateFleet() { fleetSummaries = fleetController.summaries(profiles: servers, activeID: activeServerID, system: system, wireGuard: wireGuard, units: units, security: security, incidents: incidents) }
     func exposureName(_ endpoint: NetworkEndpoint) -> String { ExposureAnalyzer.displayName(endpoint, listeners: listeners) }
     private func currentBaseline(_ nodeID: UUID) -> ConfigurationBaseline { BaselineEngine.capture(nodeID: nodeID, endpoints: exposureEndpoints, units: units, wireGuard: wireGuard, ssh: security.ssh, hashes: currentConfigurationHashes) }
-    func setCurrentBaseline() async { guard let nodeID = activeServerID else { return }; let baseline = currentBaseline(nodeID); if let profile = servers.first(where: { $0.id == nodeID }), let persistenceStore { try? await persistenceStore.upsert(node: LegacyModelAdapter.node(from: profile)); try? await persistenceStore.save(baseline: baseline) }; configurationBaseline = baseline; baselineDrift = [] }
+    func setCurrentBaseline() async { guard let nodeID = activeServerID else { return }; let baseline = currentBaseline(nodeID); if let profile = servers.first(where: { $0.id == nodeID }), let persistenceStore { try? await persistenceStore.upsert(node: LegacyModelAdapter.node(from: profile)); try? await persistenceStore.save(baseline: baseline) }; configurationBaseline = baseline; baselineDrift = []; evaluateAlerts() }
     func loadBaseline() async { guard let nodeID = activeServerID, let persistenceStore else { return }; configurationBaseline = try? await persistenceStore.latestBaseline(nodeID: nodeID); if let configurationBaseline { baselineDrift = BaselineEngine.diff(baseline: configurationBaseline, current: currentBaseline(nodeID)) } }
+    private func configureDefaultAlerts() { guard let nodeID = activeServerID, alertRules.isEmpty else { return }; alertRules = AlertRuleKind.allCases.map { kind in AlertRule(id: UUID(), nodeID: nodeID, kind: kind, enabled: true, threshold: kind == .disk || kind == .memory ? 90 : kind == .ping ? 250 : kind == .peerInactive ? settings.handshakeTimeout : nil, severity: [.nodeOffline,.publicDNS,.newPublicListener,.configurationDrift].contains(kind) ? .critical : .warning, cooldown: 900, muteUntil: nil, acknowledgedAt: nil) } }
+    private func evaluateAlerts() { let conditions: [AlertRuleKind:Bool] = [.nodeOffline:system.health == .offline,.serviceOffline:units.contains{$0.health == .offline},.disk:system.diskPercent >= 90,.memory:system.memoryPercent >= 90,.ping:(system.pingMilliseconds ?? 0) >= 250,.publicDNS:exposureEndpoints.contains{$0.port == 53 && $0.classification == .publicInternet},.newPublicListener:baselineDrift.contains{$0.category == "public-listener" && $0.kind == .added},.peerInactive:wireGuard.peers.contains{$0.status == .offline},.configurationDrift:!baselineDrift.isEmpty]; let result=AlertEngine.evaluate(rules:alertRules,conditions:conditions,previous:alertStates); alertStates=result.states; alertEvents.append(contentsOf:result.events) }
+    func acknowledge(_ id: UUID) { guard var state=alertStates[id] else{return}; state.acknowledgedAt=Date(); alertStates[id]=state }
 
     func testSSH() async -> Bool {
         let result = await execute(.uname, subsystem: "SSH Test")
@@ -623,10 +631,10 @@ final class AppViewModel: ObservableObject {
 }
 
 enum SidebarSection: String, CaseIterable, Identifiable {
-    case fleet = "Fleet Overview", topology = "Topology", dashboard = "Node Dashboard", incidents = "Incidents", exposure = "Exposure", baseline = "Baseline & Drift", doctor = "Doctor", monitoring = "Monitoring", wireGuard = "WireGuard", profiles = "Profiles", dns = "DNS & AdGuard", antiZapret = "AntiZapret", services = "Services", diagnostics = "Diagnostics", security = "Security", backups = "Backups", activity = "Activity", recovery = "Recovery", router = "Router", homeAccess = "Home Access", logs = "Logs", settings = "Settings"
+    case fleet = "Fleet Overview", topology = "Topology", dashboard = "Node Dashboard", incidents = "Incidents", exposure = "Exposure", baseline = "Baseline & Drift", alerts = "Alert Rules", doctor = "Doctor", monitoring = "Monitoring", wireGuard = "WireGuard", profiles = "Profiles", dns = "DNS & AdGuard", antiZapret = "AntiZapret", services = "Services", diagnostics = "Diagnostics", security = "Security", backups = "Backups", activity = "Activity", recovery = "Recovery", router = "Router", homeAccess = "Home Access", logs = "Logs", settings = "Settings"
     var id: String { rawValue }
     var icon: String {
-        switch self { case .fleet: "server.rack"; case .topology: "point.3.connected.trianglepath.dotted"; case .dashboard: "gauge"; case .incidents: "exclamationmark.triangle"; case .exposure: "network.badge.shield.half.filled"; case .baseline: "scope"; case .doctor: "cross.case"; case .monitoring: "waveform.path.ecg"; case .wireGuard: "network"; case .profiles: "doc.text"; case .antiZapret: "shield.lefthalf.filled"; case .dns: "server.rack"; case .services: "gearshape.2"; case .diagnostics: "stethoscope"; case .security: "lock.shield"; case .backups: "externaldrive.badge.timemachine"; case .activity: "clock.arrow.circlepath"; case .recovery: "lifepreserver"; case .router: "wifi.router"; case .homeAccess: "house"; case .logs: "list.bullet.rectangle"; case .settings: "gear" }
+        switch self { case .fleet: "server.rack"; case .topology: "point.3.connected.trianglepath.dotted"; case .dashboard: "gauge"; case .incidents: "exclamationmark.triangle"; case .exposure: "network.badge.shield.half.filled"; case .baseline: "scope"; case .alerts: "bell.badge"; case .doctor: "cross.case"; case .monitoring: "waveform.path.ecg"; case .wireGuard: "network"; case .profiles: "doc.text"; case .antiZapret: "shield.lefthalf.filled"; case .dns: "server.rack"; case .services: "gearshape.2"; case .diagnostics: "stethoscope"; case .security: "lock.shield"; case .backups: "externaldrive.badge.timemachine"; case .activity: "clock.arrow.circlepath"; case .recovery: "lifepreserver"; case .router: "wifi.router"; case .homeAccess: "house"; case .logs: "list.bullet.rectangle"; case .settings: "gear" }
     }
 }
 

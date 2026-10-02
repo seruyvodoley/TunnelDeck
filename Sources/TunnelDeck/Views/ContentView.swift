@@ -18,6 +18,7 @@ struct ContentView: View {
         case .incidents: IncidentView()
         case .exposure: ExposureView()
         case .baseline: BaselineView()
+        case .alerts: AlertRulesView()
         case .doctor: DoctorView()
         case .monitoring: MonitoringView()
         case .wireGuard: WireGuardView()
