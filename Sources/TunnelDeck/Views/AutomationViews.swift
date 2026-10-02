@@ -204,6 +204,7 @@ struct RecoveryView: View {
         Text("Latest backups").font(.headline)
         ForEach(model.backups.prefix(5)) { backup in HStack { Text(backup.timestamp); Text(backup.operation).foregroundStyle(.secondary); Spacer(); Text(backup.path).font(.caption).textSelection(.enabled) } }
         Button("Open Verified Restore") { model.selectedSection = .backups }
+        Button("Export Diagnostic Bundle") { model.exportSupportBundle() }
         Text("Verified restore is available from Backups: choose a backup, select the restore type, review the SHA-256/diff preview, then restore with rollback protection.").font(.caption).foregroundStyle(.secondary)
     }.padding(20) } }
 }

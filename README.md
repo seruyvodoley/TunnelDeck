@@ -1,5 +1,17 @@
 # TunnelDeck 1.2.6
 
+> The `feature/tunneldeck-2.0` branch is an architecture preview. It preserves the 1.x dashboard and helper 1.2.1 compatibility while adding a local, read-only-first fleet operations layer.
+
+## TunnelDeck 2.0 architecture preview
+
+- Fleet Overview uses stable node UUIDs; unobserved nodes are `Unknown`.
+- Versioned SQLite stores local operational history. Existing Monitoring JSON is imported idempotently and retained for rollback compatibility.
+- Incidents group node connectivity outages and suppress dependent service false positives.
+- Topology and Exposure are evidence-based; wildcard bind alone does not prove public reachability.
+- Non-secret baselines report drift without applying changes.
+- Local alert rules are transition-only, cooldown-aware, mutable and acknowledgeable.
+- Diagnostic bundles are allowlisted, redacted and verified before ZIP creation.
+
 Native macOS control panel for a self-hosted WireGuard, AntiZapret and AdGuard Home VPS. Built with Swift, SwiftUI and the system OpenSSH client—no Electron, embedded terminal, passwords or private keys in the app bundle.
 
 ![TunnelDeck first-run assistant](docs/screenshots/onboarding.png)

@@ -367,3 +367,52 @@ import Testing
     #expect(events.contains { $0.component == "disk" && $0.state == .warning })
     #expect(events.contains { $0.component == "listeners" && $0.detail.contains("tcp:8080") })
 }
+
+@Test func sqliteMigrationAndMultiNodeIsolation() async throws {
+    let folder = FileManager.default.temporaryDirectory.appendingPathComponent("TunnelDeckTests-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true); defer { try? FileManager.default.removeItem(at: folder) }
+    let store = try InfrastructureStore(url: folder.appendingPathComponent("test.sqlite3"))
+    #expect(try await store.schemaVersion() == InfrastructureStore.currentSchemaVersion)
+    let first = InfrastructureNode(id: UUID(), name: "A", role: .gateway, customRole: nil, host: "node-a.invalid", sshPort: 22, createdAt: Date(), updatedAt: Date(), enabled: true)
+    let second = InfrastructureNode(id: UUID(), name: "B", role: .dns, customRole: nil, host: "node-b.invalid", sshPort: 22, createdAt: Date(), updatedAt: Date(), enabled: true)
+    try await store.upsert(node: first); try await store.upsert(node: second)
+    let sample = MonitoringSample(id: UUID(), timestamp: Date(), cpuPercent: 1, memoryPercent: 2, diskPercent: 3, pingMilliseconds: 4, vpsState: .online, wireGuardState: .online, adGuardState: .online, antiZapretState: .online, publicDNSExposed: false, publicListeners: [])
+    try await store.insert(sample: sample, nodeID: first.id)
+    #expect(try await store.sampleCount(nodeID: first.id) == 1)
+    #expect(try await store.sampleCount(nodeID: second.id) == 0)
+}
+
+@Test func legacyMonitoringImportIsIdempotent() async throws {
+    let folder = FileManager.default.temporaryDirectory.appendingPathComponent("TunnelDeckImport-\(UUID().uuidString)"); try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true); defer { try? FileManager.default.removeItem(at: folder) }
+    let dbFolder = FileManager.default.temporaryDirectory.appendingPathComponent("TunnelDeckDB-\(UUID().uuidString)"); try FileManager.default.createDirectory(at: dbFolder, withIntermediateDirectories: true); defer { try? FileManager.default.removeItem(at: dbFolder) }
+    let node = InfrastructureNode(id: UUID(), name: "Legacy", role: .primary, customRole: nil, host: "legacy.invalid", sshPort: 22, createdAt: Date(), updatedAt: Date(), enabled: true)
+    let sample = MonitoringSample(id: UUID(), timestamp: Date(), cpuPercent: 1, memoryPercent: 2, diskPercent: 3, pingMilliseconds: nil, vpsState: .online, wireGuardState: .online, adGuardState: .unknown, antiZapretState: .unknown, publicDNSExposed: false, publicListeners: [])
+    var object = try JSONSerialization.jsonObject(with: JSONEncoder().encode([sample])) as! [[String:Any]]; object[0].removeValue(forKey: "nodeID"); try JSONSerialization.data(withJSONObject: object).write(to: folder.appendingPathComponent("samples-legacy.invalid.json"))
+    let store = try InfrastructureStore(url: dbFolder.appendingPathComponent("test.sqlite3")); try await store.upsert(node: node); let importer = LegacyMonitoringImporter(folder: folder)
+    _ = try await importer.importHistory(for: node, into: store); _ = try await importer.importHistory(for: node, into: store)
+    #expect(try await store.sampleCount(nodeID: node.id) == 1)
+}
+
+@Test func incidentGroupingSuppressesDependentServices() {
+    let node=UUID(), start=Date(); let events=[MonitoringEvent(id:UUID(),timestamp:start,component:"vps",title:"VPS offline",detail:"",state:.offline,recovered:false),MonitoringEvent(id:UUID(),timestamp:start,component:"wg0",title:"wg0 unknown",detail:"",state:.unknown,recovered:false),MonitoringEvent(id:UUID(),timestamp:start.addingTimeInterval(60),component:"vps",title:"VPS recovered",detail:"",state:.online,recovered:true)]
+    let incidents=IncidentEngine.incidents(events:events,nodeID:node); #expect(incidents.count == 1); #expect(incidents[0].observableCondition == "VPS connectivity outage"); #expect(incidents[0].recoveryState == .recovered); #expect(incidents[0].duration == 60)
+}
+
+@Test func exposureRequiresFirewallEvidenceAndMergesIPFamilies() {
+    let listeners=[Listener(protocolName:"tcp",address:"0.0.0.0",port:53,process:"AdGuardHome"),Listener(protocolName:"tcp6",address:"::",port:53,process:"AdGuardHome")]
+    let unknown=ExposureAnalyzer.analyze(listeners:listeners,nodeID:UUID(),publicAddresses:[],vpnAddresses:[],firewallEvidence:""); #expect(unknown.count == 1); #expect(unknown[0].classification == .unknown); #expect(unknown[0].addressFamily == .dualStack)
+    let blocked=ExposureAnalyzer.analyze(listeners:listeners,nodeID:UUID(),publicAddresses:[],vpnAddresses:[],firewallEvidence:"53/tcp DENY Anywhere"); #expect(blocked[0].classification == .firewallBlocked)
+}
+
+@Test func baselineDiffFindsListenersPeersAndPolicy() {
+    let node=UUID(); let old=ConfigurationBaseline(id:UUID(),nodeID:node,createdAt:Date(),publicListeners:["tcp:22"],services:["sshd"],ports:[22],wireGuardInterfaces:["wg0"],peerPublicIdentifiers:["peer-a"],dnsBinds:[],sshPolicy:["port":"22"],configurationHashes:["wg0":"a"]); var new=old; new.publicListeners.append("tcp:8080"); new.peerPublicIdentifiers=[]; new.sshPolicy["port"]="2222"; new.configurationHashes["wg0"]="b"; let drift=BaselineEngine.diff(baseline:old,current:new); #expect(drift.contains{$0.category == "public-listener" && $0.kind == .added}); #expect(drift.contains{$0.category == "wireguard-peer" && $0.kind == .removed}); #expect(drift.contains{$0.category == "ssh-policy"}); #expect(drift.contains{$0.category == "config-hash"})
+}
+
+@Test func alertsDeduplicateAndEmitRecovery() {
+    let rule=AlertRule(id:UUID(),nodeID:UUID(),kind:.nodeOffline,enabled:true,threshold:nil,severity:.critical,cooldown:60,muteUntil:nil,acknowledgedAt:nil); let first=AlertEngine.evaluate(rules:[rule],conditions:[.nodeOffline:true],previous:[:]); #expect(first.events.count == 1); let duplicate=AlertEngine.evaluate(rules:[rule],conditions:[.nodeOffline:true],previous:first.states); #expect(duplicate.events.isEmpty); let recovery=AlertEngine.evaluate(rules:[rule],conditions:[.nodeOffline:false],previous:duplicate.states); #expect(recovery.events.count == 1); #expect(recovery.events[0].isRecovery)
+}
+
+@Test func supportBundleRedactsEveryForbiddenSecret() throws {
+    let log=LogEntry(timestamp:Date(),subsystem:"test",command:"fixture",stdout:"PrivateKey = supersecret\nPresharedKey = psk\nAuthorization: Bearer abc\nCookie: sid=123\npassword=hunter2\ntoken=xyz",stderr:"",exitCode:0)
+    let input=SupportBundleInput(applicationVersion:"test",helperVersion:"1.2.1",node:nil,health:nil,security:SecuritySnapshot(),exposure:[],samples:[],incidents:[],events:[],drift:[],logs:[log]); let files=try SupportBundleService.sanitizedFiles(input); let combined=files.values.joined(separator:"\n"); #expect(!combined.contains("supersecret")); #expect(!combined.contains("hunter2")); #expect(!combined.contains("Bearer abc")); #expect(!SupportBundleService.containsForbiddenSecret(combined))
+}

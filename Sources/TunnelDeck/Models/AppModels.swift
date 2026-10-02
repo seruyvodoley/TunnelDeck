@@ -115,7 +115,7 @@ struct Listener: Identifiable, Sendable, Hashable {
     var isPublic: Bool { address == "0.0.0.0" || address == "::" || address == "[::]" || address == "*" }
 }
 
-struct SecurityListener: Identifiable, Sendable, Hashable {
+struct SecurityListener: Identifiable, Codable, Sendable, Hashable {
     var id: String { "\(protocolName)-\(port)-\(service)" }
     let service: String
     let protocolName: String
@@ -191,6 +191,10 @@ struct MonitoringSample: Identifiable, Codable, Sendable {
     let antiZapretState: HealthState
     let publicDNSExposed: Bool
     let publicListeners: [String]
+
+    private enum CodingKeys: String, CodingKey { case nodeID,id,timestamp,cpuPercent,memoryPercent,diskPercent,pingMilliseconds,vpsState,wireGuardState,adGuardState,antiZapretState,publicDNSExposed,publicListeners }
+    init(nodeID: UUID = LegacyNodeIdentity.unassigned, id: UUID, timestamp: Date, cpuPercent: Double, memoryPercent: Double, diskPercent: Double, pingMilliseconds: Double?, vpsState: HealthState, wireGuardState: HealthState, adGuardState: HealthState, antiZapretState: HealthState, publicDNSExposed: Bool, publicListeners: [String]) { self.nodeID=nodeID;self.id=id;self.timestamp=timestamp;self.cpuPercent=cpuPercent;self.memoryPercent=memoryPercent;self.diskPercent=diskPercent;self.pingMilliseconds=pingMilliseconds;self.vpsState=vpsState;self.wireGuardState=wireGuardState;self.adGuardState=adGuardState;self.antiZapretState=antiZapretState;self.publicDNSExposed=publicDNSExposed;self.publicListeners=publicListeners }
+    init(from decoder: Decoder) throws { let c=try decoder.container(keyedBy:CodingKeys.self); nodeID=try c.decodeIfPresent(UUID.self,forKey:.nodeID) ?? LegacyNodeIdentity.unassigned; id=try c.decode(UUID.self,forKey:.id);timestamp=try c.decode(Date.self,forKey:.timestamp);cpuPercent=try c.decode(Double.self,forKey:.cpuPercent);memoryPercent=try c.decode(Double.self,forKey:.memoryPercent);diskPercent=try c.decode(Double.self,forKey:.diskPercent);pingMilliseconds=try c.decodeIfPresent(Double.self,forKey:.pingMilliseconds);vpsState=try c.decode(HealthState.self,forKey:.vpsState);wireGuardState=try c.decode(HealthState.self,forKey:.wireGuardState);adGuardState=try c.decode(HealthState.self,forKey:.adGuardState);antiZapretState=try c.decode(HealthState.self,forKey:.antiZapretState);publicDNSExposed=try c.decode(Bool.self,forKey:.publicDNSExposed);publicListeners=try c.decode([String].self,forKey:.publicListeners) }
 }
 
 struct MonitoringEvent: Identifiable, Codable, Sendable {

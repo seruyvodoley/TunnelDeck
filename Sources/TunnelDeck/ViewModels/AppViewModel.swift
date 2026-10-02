@@ -478,6 +478,8 @@ final class AppViewModel: ObservableObject {
         } catch { presentedError = AppError(title: "Emergency Kit failed", message: "The local recovery archive could not be created.", technicalDetails: SecretRedactor.redact(error.localizedDescription), recommendedAction: "Check Application Support permissions and available disk space.") }
     }
 
+    func exportSupportBundle() { do { let profile=servers.first{$0.id == activeServerID}; let node=profile.map { LegacyModelAdapter.node(from:$0) }; let input=SupportBundleInput(applicationVersion:Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "2.0-dev",helperVersion:helperVersion,node:node,health:healthReport,security:security,exposure:exposureEndpoints,samples:monitoringSamples,incidents:incidents,events:monitoringEvents,drift:baselineDrift,logs:logs); let archive=try SupportBundleService.create(input); ProfileStore.revealURL(archive) } catch { presentedError=AppError(title:"Support Bundle failed",message:"The sanitized diagnostic archive could not be created.",technicalDetails:SecretRedactor.redact(error.localizedDescription),recommendedAction:"Review local Application Support permissions and retry.") } }
+
     func downloadBackup(_ backup: BackupRecord) async {
         let folder = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("TunnelDeck/Backups", isDirectory: true)
         do {
@@ -521,8 +523,7 @@ final class AppViewModel: ObservableObject {
     }
 
     func loadMonitoringHistory() async {
-        monitoringSamples = await monitoringStore.loadSamples(host: settings.host)
-        monitoringEvents = await monitoringStore.loadEvents(host: settings.host)
+        if let nodeID=activeServerID,let profile=servers.first(where:{$0.id==nodeID}),let persistenceStore { try? await persistenceStore.upsert(node:LegacyModelAdapter.node(from:profile)); _=try? await LegacyMonitoringImporter().importHistory(for:LegacyModelAdapter.node(from:profile),into:persistenceStore); monitoringSamples=(try? await persistenceStore.samples(nodeID:nodeID)) ?? []; let stored=(try? await persistenceStore.events(nodeID:nodeID)) ?? []; monitoringEvents=stored.map { MonitoringEvent(id:$0.id,timestamp:$0.timestamp,component:$0.componentID,title:$0.title,detail:$0.detail,state:$0.state,recovered:$0.isRecovery) } } else { monitoringSamples=await monitoringStore.loadSamples(host:settings.host); monitoringEvents=await monitoringStore.loadEvents(host:settings.host) }
         rebuildIncidents()
     }
 
@@ -552,6 +553,7 @@ final class AppViewModel: ObservableObject {
         let result = await monitoringStore.record(host: settings.host, sample: sample)
         monitoringSamples = result.samples
         monitoringEvents = result.events
+        if let nodeID=activeServerID,let persistenceStore { try? await persistenceStore.insert(sample:sample,nodeID:nodeID); for event in result.newEvents { try? await persistenceStore.insert(event:LegacyModelAdapter.event(from:event,nodeID:nodeID)) } }
         rebuildIncidents()
 
         if settings.notificationsEnabled {
