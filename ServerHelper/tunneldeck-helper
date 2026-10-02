@@ -15,7 +15,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 WG_CONFIG = Path("/etc/wireguard/wg0.conf")
 WG_INTERFACE = "wg0"
 BACKUP_ROOT = Path("/root/tunneldeck-backups")
@@ -24,6 +24,7 @@ METADATA_PATH = Path("/root/tunneldeck/peers.json")
 NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,48}$")
 WG_KEY_RE = re.compile(r"^[A-Za-z0-9+/]{43}=$")
 UNIT_RE = re.compile(r"^(wg-quick@wg0|antizapret|antizapret-update|wg-quick@antizapret|wg-quick@vpn|openvpn-server@antizapret-udp|openvpn-server@vpn-udp|AdGuardHome)(\.service|\.timer)?$")
+FULL_BACKUP_FILES = [WG_CONFIG, METADATA_PATH, Path("/root/antizapret/setup"), Path("/etc/wireguard/antizapret.conf"), Path("/etc/wireguard/vpn.conf"), Path("/opt/AdGuardHome/AdGuardHome.yaml")]
 
 
 class HelperError(RuntimeError):
@@ -158,6 +159,12 @@ def create_backup(operation, files):
     (destination / "ip-route.txt").write_text(run(["ip", "route"], check=False).stdout)
     atomic_write(destination / "manifest.json", json.dumps(manifest, indent=2) + "\n")
     return destination
+
+
+def cleanup_backups(retention=14):
+    backups = sorted((item for item in BACKUP_ROOT.glob("*") if item.is_dir()), key=lambda item: item.name, reverse=True)
+    for expired in backups[retention:]:
+        shutil.rmtree(expired)
 
 
 def validate_wg_config(path):
@@ -379,7 +386,10 @@ def main():
     args = parser().parse_args()
     if args.command == "version": result = {"version": VERSION}
     elif args.command in ("status", "health"): result = snapshot_health()
-    elif args.command == "backup": result = {"backup": str(create_backup(args.operation, [WG_CONFIG, METADATA_PATH]))}
+    elif args.command == "backup":
+        backup_path = create_backup(args.operation, FULL_BACKUP_FILES)
+        cleanup_backups(14)
+        result = {"backup": str(backup_path)}
     elif args.command == "list-backups": result = list_backups()
     elif args.command == "wg-list": result = wg_list()
     elif args.command == "wg-add-peer": result = wg_add_peer(args)

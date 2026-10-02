@@ -43,6 +43,26 @@ actor SSHService {
         processes.removeAll()
     }
 
+    func downloadBackup(remotePath: String, destination: URL, configuration: SSHConfiguration) async throws {
+        guard remotePath.range(of: #"^/root/tunneldeck-backups/[A-Za-z0-9_-]+$"#, options: .regularExpression) != nil else { throw CommandPolicyError.deniedCommand }
+        try CommandPolicy.validate(host: configuration.host, username: configuration.username, keyPath: configuration.keyPath)
+        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let process = Process(); let error = Pipe(); process.executableURL = URL(fileURLWithPath: "/usr/bin/scp")
+        var arguments = ["-r", "-P", String(configuration.port), "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes"]
+        if !configuration.keyPath.isEmpty { arguments += ["-i", configuration.keyPath, "-o", "IdentitiesOnly=yes"] }
+        arguments += ["\(configuration.username)@\(configuration.host):\(remotePath)", destination.path]
+        process.arguments = arguments; process.standardError = error
+        try process.run(); process.waitUntilExit()
+        guard process.terminationStatus == 0 else { throw NSError(domain: "TunnelDeck.SCP", code: Int(process.terminationStatus), userInfo: [NSLocalizedDescriptionKey: SecretRedactor.redact(String(decoding: error.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self))]) }
+        let downloaded = destination.appendingPathComponent((remotePath as NSString).lastPathComponent)
+        if FileManager.default.fileExists(atPath: downloaded.path) {
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: downloaded.path)
+            let chmod = Process(); chmod.executableURL = URL(fileURLWithPath: "/bin/chmod"); chmod.arguments = ["-R", "go-rwx", downloaded.path]
+            try chmod.run(); chmod.waitUntilExit()
+            guard chmod.terminationStatus == 0 else { throw NSError(domain: "TunnelDeck.Permissions", code: Int(chmod.terminationStatus)) }
+        }
+    }
+
     private func run(command: String, configuration: SSHConfiguration, redact: Bool) async throws -> CommandResult {
         let identifier = UUID()
         let process = Process()

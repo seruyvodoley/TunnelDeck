@@ -23,10 +23,18 @@ final class AppViewModel: ObservableObject {
     @Published var presentedError: AppError?
     @Published var localProfiles: [LocalProfile] = []
     @Published var managedPeers: [HelperPeer] = []
+    @Published var healthReport: HealthReport?
+    @Published var activity: [ActivityRecord] = []
+    @Published var lastSuccessfulHealthCheck: Date?
+    @Published var isRunningHealthCheck = false
+    @Published var servers: [ServerProfile] = []
+    @Published var activeServerID: UUID?
+    @Published var configurationDrift: [String] = []
 
     let ssh = SSHService()
     lazy var helper = HelperService(ssh: ssh)
     private let history = DiagnosticHistoryStore()
+    private let activityStore = ActivityStore()
     private var pollTask: Task<Void, Never>?
     private var previousCPUTicks: (idle: Double, total: Double)?
 
@@ -39,6 +47,9 @@ final class AppViewModel: ObservableObject {
         system.macLANIP = LocalNetworkService.lanIPv4()
         localProfiles = ProfileStore.list()
         Task { diagnostics = await history.load() }
+        Task { activity = await activityStore.load() }
+        if let data = UserDefaults.standard.data(forKey: "servers") { servers = (try? JSONDecoder().decode([ServerProfile].self, from: data)) ?? [] }
+        activeServerID = UserDefaults.standard.string(forKey: "activeServerID").flatMap(UUID.init)
     }
 
     var configuration: SSHConfiguration { SSHConfiguration(host: settings.host, username: settings.username, keyPath: NSString(string: settings.keyPath).expandingTildeInPath, timeout: 8, port: settings.port) }
@@ -48,6 +59,20 @@ final class AppViewModel: ObservableObject {
         var persisted = settings; persisted.keyPath = ""
         if let data = try? JSONEncoder().encode(persisted) { UserDefaults.standard.set(data, forKey: "settings") }
         configurePolling()
+    }
+
+    func saveCurrentServer(name: String = "Primary VPS", role: String = "Primary") {
+        let profile = ServerProfile(id: activeServerID ?? UUID(), name: name, host: settings.host, port: settings.port, username: settings.username, keyPath: settings.keyPath, role: role)
+        servers.removeAll { $0.id == profile.id }; servers.append(profile); activeServerID = profile.id
+        if let data = try? JSONEncoder().encode(servers) { UserDefaults.standard.set(data, forKey: "servers") }
+        UserDefaults.standard.set(profile.id.uuidString, forKey: "activeServerID"); saveSettings()
+    }
+
+    func selectServer(_ id: UUID) {
+        guard let server = servers.first(where: { $0.id == id }) else { return }
+        activeServerID = id; UserDefaults.standard.set(id.uuidString, forKey: "activeServerID"); settings.host = server.host; settings.port = server.port; settings.username = server.username; settings.keyPath = server.keyPath
+        system = SystemSnapshot(); wireGuard = WireGuardSnapshot(); units = []; listeners = []; healthReport = nil
+        saveSettings(); Task { await refresh() }
     }
 
     func completeOnboarding() { settings.completedOnboarding = true; showOnboarding = false; saveSettings() }
@@ -109,6 +134,8 @@ final class AppViewModel: ObservableObject {
         profiles = ProfileParser.parseListing(values.14.stdout)
         lastRefresh = Date(); statusMessage = values.0.succeeded ? "Updated" : "SSH unavailable"
         if values.0.succeeded { await refreshHelper() }
+        await evaluateMonitoringState()
+        await performScheduledBackupIfNeeded()
     }
 
     func refreshHelper() async {
@@ -165,12 +192,83 @@ final class AppViewModel: ObservableObject {
         do {
             let change = try await helper.service(action: action, unit: unit, configuration: configuration)
             logs.insert(LogEntry(timestamp: Date(), subsystem: "System", command: "helper service \(action) \(unit)", stdout: "state=\(change.state) backup=\(change.backup)", stderr: "", exitCode: 0), at: 0)
+            await activityStore.append(operation: "Service \(action)", server: settings.host, preview: unit, result: "state=\(change.state), backup=\(change.backup)")
+            activity = await activityStore.load()
             await refresh()
             return true
         } catch {
             presentedError = AppError(title: "Service action failed", message: "\(unit) could not be \(action)ed safely.", technicalDetails: SecretRedactor.redact(error.localizedDescription), recommendedAction: "Review the helper backup and service journal before retrying.")
             return false
         }
+    }
+
+    func runFullHealthCheck() async {
+        guard !isRunningHealthCheck else { return }
+        isRunningHealthCheck = true; defer { isRunningHealthCheck = false }
+        let commands: [ReadCommand] = [.hostname, .wireGuardService, .wireGuard, .wireGuardAddress, .udpListeners, .ipForward, .natRules, .pingInternet, .dnsTest, .adGuardStatus, .adGuardBinds, .antiZapretStatus, .disk, .memory, .uptime, .listeners, .firewallState, .configurationHashes]
+        var results: [ReadCommand: CommandResult] = [:]
+        for command in commands { results[command] = await execute(command, subsystem: "Doctor") }
+        healthReport = HealthEvaluator.report(results: results, listeners: listeners, system: system, wireGuard: wireGuard, host: settings.host)
+        detectConfigurationDrift(results[.configurationHashes]?.stdout ?? "", storeBaseline: healthReport?.state == .online)
+        if healthReport?.state == .online { lastSuccessfulHealthCheck = Date() }
+        await activityStore.append(operation: "Full Health Check", server: settings.host, preview: "\(commands.count) read-only checks", result: healthReport?.state.rawValue ?? "unknown")
+        activity = await activityStore.load()
+    }
+
+    private func detectConfigurationDrift(_ output: String, storeBaseline: Bool) {
+        let current = Dictionary(uniqueKeysWithValues: output.split(separator: "\n").compactMap { line -> (String, String)? in
+            let fields = line.split(whereSeparator: \.isWhitespace); guard fields.count >= 2 else { return nil }; return (String(fields[1]), String(fields[0]))
+        })
+        let key = "configurationHashes-\(settings.host)"
+        let previous = UserDefaults.standard.dictionary(forKey: key) as? [String: String] ?? [:]
+        configurationDrift = current.compactMap { path, hash in previous[path].map { $0 == hash ? nil : "\(path): \($0.prefix(12)) → \(hash.prefix(12))" } ?? nil }
+        if storeBaseline && configurationDrift.isEmpty { UserDefaults.standard.set(current, forKey: key) }
+    }
+
+    func createBackup(operation: String = "scheduled") async -> Bool {
+        guard settings.writeModeEnabled, helperVersion == HelperService.localVersion else { return false }
+        do {
+            let path = try await helper.createBackup(operation: operation, configuration: configuration)
+            UserDefaults.standard.set(Date(), forKey: "lastScheduledBackup")
+            await activityStore.append(operation: "Configuration backup", server: settings.host, preview: operation, result: path)
+            activity = await activityStore.load(); await refreshHelper(); return true
+        } catch {
+            presentedError = AppError(title: "Backup failed", message: "TunnelDeck could not create a verified server backup.", technicalDetails: SecretRedactor.redact(error.localizedDescription), recommendedAction: "Verify helper version, disk space and Write Mode.")
+            return false
+        }
+    }
+
+    func createEmergencyKit() {
+        do {
+            let server = servers.first { $0.id == activeServerID } ?? ServerProfile(name: "Current VPS", host: settings.host, port: settings.port, username: settings.username, keyPath: "", role: "Primary")
+            let archive = try EmergencyKitService.create(health: healthReport, server: server, profiles: localProfiles, backups: backups)
+            Task { await activityStore.append(operation: "Create Emergency Kit", server: settings.host, preview: "Sanitized recovery archive", result: archive.path); activity = await activityStore.load() }
+            ProfileStore.revealURL(archive)
+        } catch { presentedError = AppError(title: "Emergency Kit failed", message: "The local recovery archive could not be created.", technicalDetails: SecretRedactor.redact(error.localizedDescription), recommendedAction: "Check Application Support permissions and available disk space.") }
+    }
+
+    func downloadBackup(_ backup: BackupRecord) async {
+        let folder = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("TunnelDeck/Backups", isDirectory: true)
+        do {
+            try await ssh.downloadBackup(remotePath: backup.path, destination: folder, configuration: configuration)
+            await activityStore.append(operation: "Download Backup", server: settings.host, preview: backup.operation, result: folder.path)
+            activity = await activityStore.load(); ProfileStore.revealURL(folder.appendingPathComponent((backup.path as NSString).lastPathComponent))
+        } catch { presentedError = AppError(title: "Backup download failed", message: "The server backup could not be copied to this Mac.", technicalDetails: SecretRedactor.redact(error.localizedDescription), recommendedAction: "Check SSH access and local Application Support permissions.") }
+    }
+
+    private func performScheduledBackupIfNeeded() async {
+        guard settings.writeModeEnabled, helperVersion == HelperService.localVersion else { return }
+        let last = UserDefaults.standard.object(forKey: "lastScheduledBackup") as? Date ?? .distantPast
+        if Date().timeIntervalSince(last) >= 86_400 { _ = await createBackup() }
+    }
+
+    private func evaluateMonitoringState() async {
+        let current = ["vps": system.health.rawValue, "wg0": wireGuard.state.rawValue, "adguard": units.first { $0.name.contains("AdGuardHome") }?.activeState ?? "unknown", "antizapret": units.first { $0.name == "antizapret.service" }?.activeState ?? "unknown", "dnsPublic": String(listeners.contains { $0.isPublic && $0.port == 53 }), "diskCritical": String(system.diskPercent >= 90)]
+        let previous = UserDefaults.standard.dictionary(forKey: "monitoringState") as? [String: String] ?? [:]
+        if settings.notificationsEnabled {
+            for (key, value) in current where previous[key] != nil && previous[key] != value { NotificationService.send(title: "TunnelDeck state changed", body: "\(key): \(previous[key]!) → \(value)", id: "tunneldeck-\(key)-\(value)") }
+        }
+        UserDefaults.standard.set(current, forKey: "monitoringState")
     }
 
     func testSSH() async -> Bool {
@@ -215,10 +313,10 @@ final class AppViewModel: ObservableObject {
 }
 
 enum SidebarSection: String, CaseIterable, Identifiable {
-    case dashboard = "Dashboard", wireGuard = "WireGuard", profiles = "Profiles", dns = "DNS & AdGuard", antiZapret = "AntiZapret", services = "Services", diagnostics = "Diagnostics", security = "Security", backups = "Backups", router = "Router", homeAccess = "Home Access", logs = "Logs", settings = "Settings"
+    case dashboard = "Dashboard", doctor = "Doctor", monitoring = "Monitoring", wireGuard = "WireGuard", profiles = "Profiles", dns = "DNS & AdGuard", antiZapret = "AntiZapret", services = "Services", diagnostics = "Diagnostics", security = "Security", backups = "Backups", activity = "Activity", recovery = "Recovery", router = "Router", homeAccess = "Home Access", logs = "Logs", settings = "Settings"
     var id: String { rawValue }
     var icon: String {
-        switch self { case .dashboard: "gauge"; case .wireGuard: "network"; case .profiles: "doc.text"; case .antiZapret: "shield.lefthalf.filled"; case .dns: "server.rack"; case .services: "gearshape.2"; case .diagnostics: "stethoscope"; case .security: "lock.shield"; case .backups: "externaldrive.badge.timemachine"; case .router: "wifi.router"; case .homeAccess: "house"; case .logs: "list.bullet.rectangle"; case .settings: "gear" }
+        switch self { case .dashboard: "gauge"; case .doctor: "cross.case"; case .monitoring: "waveform.path.ecg"; case .wireGuard: "network"; case .profiles: "doc.text"; case .antiZapret: "shield.lefthalf.filled"; case .dns: "server.rack"; case .services: "gearshape.2"; case .diagnostics: "stethoscope"; case .security: "lock.shield"; case .backups: "externaldrive.badge.timemachine"; case .activity: "clock.arrow.circlepath"; case .recovery: "lifepreserver"; case .router: "wifi.router"; case .homeAccess: "house"; case .logs: "list.bullet.rectangle"; case .settings: "gear" }
     }
 }
 

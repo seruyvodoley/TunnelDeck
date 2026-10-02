@@ -9,7 +9,7 @@ struct HelperPeerChange: Codable, Sendable { let name: String?; let ip: String?;
 struct HelperServiceChange: Codable, Sendable { let unit: String; let action: String; let state: String; let backup: String }
 
 actor HelperService {
-    static let localVersion = "1.0.0"
+    static let localVersion = "1.1.0"
     private let ssh: SSHService
     init(ssh: SSHService) { self.ssh = ssh }
 
@@ -54,6 +54,14 @@ actor HelperService {
         let result = try await ssh.executeHelper(.service(action: action, unit: normalized), configuration: configuration)
         guard result.succeeded else { throw NSError(domain: "TunnelDeck.Helper", code: Int(result.exitCode), userInfo: [NSLocalizedDescriptionKey: result.stderr]) }
         return try JSONDecoder().decode(HelperServiceChange.self, from: Data(result.stdout.utf8))
+    }
+
+    func createBackup(operation: String, configuration: SSHConfiguration) async throws -> String {
+        let result = try await ssh.executeHelper(.backup(operation: operation), configuration: configuration)
+        guard result.succeeded else { throw NSError(domain: "TunnelDeck.Helper", code: Int(result.exitCode), userInfo: [NSLocalizedDescriptionKey: result.stderr]) }
+        let object = try JSONSerialization.jsonObject(with: Data(result.stdout.utf8)) as? [String: String]
+        guard let path = object?["backup"] else { throw NSError(domain: "TunnelDeck.Helper", code: 1, userInfo: [NSLocalizedDescriptionKey: "Invalid backup response"]) }
+        return path
     }
 }
 

@@ -48,6 +48,7 @@ enum ProfileStore {
 
     static func delete(_ profile: LocalProfile) throws { try FileManager.default.removeItem(at: profile.url) }
     static func reveal(_ profile: LocalProfile) { NSWorkspace.shared.activateFileViewerSelecting([profile.url]) }
+    static func revealURL(_ url: URL) { NSWorkspace.shared.activateFileViewerSelecting([url]) }
     static func open(_ profile: LocalProfile) { NSWorkspace.shared.open(profile.url) }
     static func content(_ profile: LocalProfile) throws -> String { try String(contentsOf: profile.url, encoding: .utf8) }
 

@@ -79,6 +79,8 @@ struct BackupsView: View {
                 Text("Server Backups").font(.title2.bold())
                 Spacer()
                 if let helperVersion = model.helperVersion { Text("Helper \(helperVersion)").foregroundStyle(.secondary) }
+                Button("Create Emergency Kit") { model.createEmergencyKit() }
+                Button("Backup Now") { Task { _ = await model.createBackup(operation: "manual") } }.disabled(!model.settings.writeModeEnabled || model.helperVersion != HelperService.localVersion)
                 Button("Refresh") { Task { await model.refreshHelper() } }
             }.padding()
             if model.helperVersion == nil {
@@ -90,7 +92,7 @@ struct BackupsView: View {
                     TableColumn("Host", value: \.hostname)
                     TableColumn("Files") { Text(String($0.files.count)) }
                     TableColumn("Size") { Text(ByteCountFormatter.string(fromByteCount: $0.size, countStyle: .file)) }
-                    TableColumn("Actions") { _ in HStack { Button("View") {}; Button("Download") {}; Button("Restore") {}.disabled(!model.settings.writeModeEnabled) } }
+                    TableColumn("Actions") { backup in HStack { Button("Download") { Task { await model.downloadBackup(backup) } }; Button("Restore") {}.disabled(true) } }
                 }
                 Text("Restore remains unavailable until helper restore preview and rollback validation are present on the server.").font(.caption).foregroundStyle(.secondary).padding(8)
             }

@@ -12,6 +12,9 @@ Native macOS control panel for a self-hosted WireGuard, AntiZapret and AdGuard H
 - AntiZapret, OpenVPN and AdGuard Home service discovery.
 - DNS listener exposure warnings and redacted local logs.
 - Profiles, QR export, diagnostics, backup inventory and menu-bar status.
+- One-click Doctor checks SSH, WireGuard, forwarding, NAT, DNS, services, resources, listeners and firewall state.
+- State-change monitoring, configuration-drift detection, multi-VPS profiles and a redacted activity trail.
+- Daily in-app scheduled backups with 14-backup server retention and local Emergency Kit export.
 - Read-only mode by default; write mode requires an explicit confirmation and matching helper version.
 
 ## Requirements
@@ -99,6 +102,12 @@ Existing peers are distinguished from TunnelDeck-managed peers using `/root/tunn
 TunnelDeck detects services and sockets independently from clean WireGuard. Wildcard DNS listeners such as `0.0.0.0:53` and `[::]:53` are reported as critical exposure. It does not silently rewrite AdGuard or Knot Resolver configuration.
 
 Service start, stop and restart actions require write mode, an explicit per-operation confirmation, a matching helper, a scoped backup and a successful state check.
+
+## Scheduled backups and Emergency Kit
+
+When Write Mode is enabled and TunnelDeck is running, it checks once per refresh whether 24 hours have elapsed since the last scheduled backup. The helper captures the relevant WireGuard, TunnelDeck metadata, AntiZapret and AdGuard configuration plus firewall, routes and service health, then retains the newest 14 backup directories.
+
+Emergency Kit creates a mode-`0600` local ZIP containing client profiles, public server metadata, the latest backup manifest reference, health report and recovery notes. It excludes server private keys, SSH keys, passwords and AdGuard credentials.
 
 ## Security model
 

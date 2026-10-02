@@ -39,18 +39,24 @@ struct WireGuardView: View {
 final class WireGuardScreenState: ObservableObject {
     @Published var selection = Set<String>(); @Published var showAdd = false; @Published var showRemove = false
     @Published var name = ""; @Published var ip = ""; @Published var dns = "1.1.1.1"; @Published var mtu = 1380; @Published var allowedIPs = "0.0.0.0/0"; @Published var endpoint = ""; @Published var deleteClient = false
+    @Published var deviceTemplate = "Generic"; @Published var routingTemplate = "FULL"
     func prepare(using model: AppViewModel) {
         ip = model.suggestedPeerIP()
         let serverIP = model.wireGuard.address.split(separator: "/").first.map(String.init) ?? ""
         dns = model.listeners.contains { $0.address == serverIP && $0.port == 53 } ? serverIP : "1.1.1.1"
         endpoint = model.settings.host.isEmpty ? "" : "\(model.settings.host):\(model.wireGuard.listenPort == "—" ? "51820" : model.wireGuard.listenPort)"
     }
+    func applyRoutingTemplate(serverIP: String) {
+        allowedIPs = "0.0.0.0/0"
+        if routingTemplate == "FULL + ADGUARD", !serverIP.isEmpty { dns = serverIP }
+        else if routingTemplate == "FULL" { dns = "1.1.1.1" }
+    }
 }
 
 struct AddPeerSheet: View {
     @ObservedObject var state: WireGuardScreenState
     let create: () -> Void
-    var body: some View { VStack(alignment: .leading, spacing: 16) { Text("Add WireGuard Peer").font(.title.bold()); Form { TextField("Name", text: $state.name); TextField("VPN IP", text: $state.ip); TextField("DNS", text: $state.dns); TextField("MTU", value: $state.mtu, format: .number); TextField("AllowedIPs", text: $state.allowedIPs); TextField("Endpoint", text: $state.endpoint) }; Text("A backup is created first. wg0 is updated live without restart. Client secrets are saved locally with mode 0600 and never logged.").foregroundStyle(.secondary); HStack { Spacer(); Button("Cancel") { state.showAdd = false }; Button("Create Peer", action: create).buttonStyle(.borderedProminent).disabled(state.name.isEmpty || state.ip.isEmpty) } }.padding(24).frame(width: 560) }
+    var body: some View { VStack(alignment: .leading, spacing: 16) { Text("Add WireGuard Peer").font(.title.bold()); Form { Picker("Device", selection: $state.deviceTemplate) { ForEach(["MacBook", "iPhone", "Android", "Router", "Generic"], id: \.self) { Text($0) } }; Picker("Routing", selection: $state.routingTemplate) { ForEach(["FULL", "FULL + ADGUARD", "CUSTOM / SPLIT"], id: \.self) { Text($0) } }.onChange(of: state.routingTemplate) { _, _ in let parts = state.ip.split(separator: "."); let serverIP = parts.count == 4 ? parts.prefix(3).joined(separator: ".") + ".1" : ""; state.applyRoutingTemplate(serverIP: serverIP) }; TextField("Name", text: $state.name); TextField("VPN IP", text: $state.ip); TextField("DNS", text: $state.dns); TextField("MTU", value: $state.mtu, format: .number); TextField("AllowedIPs", text: $state.allowedIPs).disabled(state.routingTemplate != "CUSTOM / SPLIT"); TextField("Endpoint", text: $state.endpoint) }; Text("A backup is created first. wg0 is updated live without restart. Client secrets are saved locally with mode 0600 and never logged.").foregroundStyle(.secondary); HStack { Spacer(); Button("Cancel") { state.showAdd = false }; Button("Create Peer", action: create).buttonStyle(.borderedProminent).disabled(state.name.isEmpty || state.ip.isEmpty || state.endpoint.isEmpty) } }.padding(24).frame(width: 560) }
 }
 
 struct ProfilesView: View {
@@ -79,8 +85,9 @@ struct DNSView: View {
 
 struct DiagnosticsView: View {
     @EnvironmentObject var model: AppViewModel
-    var body: some View { ScrollView { VStack(alignment: .leading, spacing: 18) { HStack { diagnosticButton("SSH Test", .uname); diagnosticButton("Ping Internet", .pingInternet); diagnosticButton("DNS Resolution", .dnsTest); diagnosticButton("WireGuard Status", .wireGuard); diagnosticButton("Detect iperf3", .iperfDetection) }; GroupBox("iperf3 — manual only") { HStack { Text("TCP upload/download and UDP tests are intentionally not started automatically."); Spacer(); Button("Run iperf3…") {}.disabled(true) }.padding(8) }; if !model.diagnostics.isEmpty { Chart(model.diagnostics.suffix(30)) { item in BarMark(x: .value("Test", item.date), y: .value("Duration", item.milliseconds ?? 0)).foregroundStyle(item.success ? .green : .red) }.frame(height: 220) }; Table(model.diagnostics.reversed()) { TableColumn("Time") { Text($0.date.formatted(date: .abbreviated, time: .standard)) }; TableColumn("Test", value: \.name); TableColumn("Result") { Text($0.success ? "Passed" : "Failed").foregroundStyle($0.success ? .green : .red) }; TableColumn("Summary", value: \.summary) }.frame(minHeight: 260) }.padding(20) } }
+    var body: some View { ScrollView { VStack(alignment: .leading, spacing: 18) { HStack { diagnosticButton("SSH Test", .uname); diagnosticButton("Ping Internet", .pingInternet); diagnosticButton("DNS Resolution", .dnsTest); diagnosticButton("WireGuard Status", .wireGuard); diagnosticButton("Detect iperf3", .iperfDetection) }; GroupBox("Leak tests") { Grid(alignment: .leading, horizontalSpacing: 20, verticalSpacing: 8) { GridRow { Text("Check").bold(); Text("Expected").bold(); Text("Actual").bold(); Text("Result").bold() }; leakRow("Public IPv4", model.system.publicIPv4, model.system.macPublicIP); leakRow("IPv6", "Disabled or explicitly routed", model.system.publicIPv6); leakRow("VPN DNS", model.wireGuard.address.split(separator: "/").first.map(String.init) ?? "Configured resolver", model.listeners.filter { $0.port == 53 }.map(\.address).joined(separator: ", ")); leakRow("Default route", "Configured policy", model.system.macLANIP) } .padding(8) }; GroupBox("iperf3 — manual only") { HStack { Text("TCP upload/download and UDP tests are intentionally not started automatically."); Spacer(); Button("Run iperf3…") {}.disabled(true) }.padding(8) }; if !model.diagnostics.isEmpty { Chart(model.diagnostics.suffix(30)) { item in BarMark(x: .value("Test", item.date), y: .value("Duration", item.milliseconds ?? 0)).foregroundStyle(item.success ? .green : .red) }.frame(height: 220) }; Table(model.diagnostics.reversed()) { TableColumn("Time") { Text($0.date.formatted(date: .abbreviated, time: .standard)) }; TableColumn("Test", value: \.name); TableColumn("Result") { Text($0.success ? "Passed" : "Failed").foregroundStyle($0.success ? .green : .red) }; TableColumn("Summary", value: \.summary) }.frame(minHeight: 260) }.padding(20) } }
     private func diagnosticButton(_ title: String, _ command: ReadCommand) -> some View { Button(title) { Task { await model.runDiagnostic(command, name: title) } } }
+    private func leakRow(_ name: String, _ expected: String, _ actual: String) -> some View { GridRow { Text(name); Text(expected).foregroundStyle(.secondary); Text(actual).textSelection(.enabled); Image(systemName: actual.isEmpty || actual == "—" ? "xmark.circle.fill" : "checkmark.circle.fill").foregroundStyle(actual.isEmpty || actual == "—" ? .red : .green) } }
 }
 
 struct RouterView: View {

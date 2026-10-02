@@ -13,6 +13,8 @@ struct ContentView: View {
     @ViewBuilder private var selectedView: some View {
         switch model.selectedSection {
         case .dashboard: DashboardView()
+        case .doctor: DoctorView()
+        case .monitoring: MonitoringView()
         case .wireGuard: WireGuardView()
         case .profiles: ProfilesView()
         case .antiZapret: AntiZapretView()
@@ -21,6 +23,8 @@ struct ContentView: View {
         case .diagnostics: DiagnosticsView()
         case .security: SecurityView()
         case .backups: BackupsView()
+        case .activity: ActivityView()
+        case .recovery: RecoveryView()
         case .router: RouterView()
         case .homeAccess: HomeAccessView()
         case .logs: LogViewer()

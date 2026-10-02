@@ -47,6 +47,18 @@ class HelperValidationTests(unittest.TestCase):
         managed = original + f"\n# TunnelDeck BEGIN {key}\n# Name: Test\n[Peer]\nPublicKey = {key}\nAllowedIPs = 10.8.0.6/32\n# TunnelDeck END {key}\n"
         self.assertEqual(helper.remove_managed_block_exact(managed, key), original)
 
+    def test_backup_retention(self):
+        with tempfile.TemporaryDirectory() as directory:
+            original = helper.BACKUP_ROOT
+            helper.BACKUP_ROOT = pathlib.Path(directory)
+            try:
+                for number in range(18):
+                    (helper.BACKUP_ROOT / f"2026-01-{number + 1:02d}_scheduled").mkdir()
+                helper.cleanup_backups(14)
+                self.assertEqual(len(list(helper.BACKUP_ROOT.iterdir())), 14)
+            finally:
+                helper.BACKUP_ROOT = original
+
 
 if __name__ == "__main__":
     unittest.main()

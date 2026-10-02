@@ -24,6 +24,15 @@ enum ReadCommand: String, CaseIterable, Sendable {
     case dnsTest = "getent ahostsv4 example.com"
     case iperfDetection = "command -v iperf3"
     case recentAntiZapretLogs = "journalctl -u antizapret.service -n 200 --no-pager -o short-iso"
+    case wireGuardService = "systemctl is-active wg-quick@wg0"
+    case udpListeners = "ss -H -lunp"
+    case ipForward = "sysctl -n net.ipv4.ip_forward"
+    case natRules = "iptables-save -t nat"
+    case firewallState = "nft list ruleset"
+    case adGuardStatus = "systemctl is-active AdGuardHome.service"
+    case antiZapretStatus = "systemctl is-active antizapret.service"
+    case adGuardBinds = "grep -E '^[[:space:]]*(address|bind_hosts|port):' /opt/AdGuardHome/AdGuardHome.yaml"
+    case configurationHashes = "sha256sum /etc/wireguard/wg0.conf /root/tunneldeck/peers.json /root/antizapret/setup /opt/AdGuardHome/AdGuardHome.yaml"
 }
 
 enum CommandPolicyError: Error, LocalizedError {
@@ -69,6 +78,7 @@ enum WriteHelperCommand: Sendable, Equatable {
     case removePeer(publicKey: String, deleteClient: Bool, allowExisting: Bool)
     case clientConfig(name: String)
     case service(action: String, unit: String)
+    case backup(operation: String)
 }
 
 enum WriteCommandPolicy {
@@ -97,6 +107,9 @@ enum WriteCommandPolicy {
         case .service(let action, let unit):
             guard ["start", "stop", "restart"].contains(action), allowedUnits.contains(unit) else { throw CommandPolicyError.deniedCommand }
             return [helperPath, "service", action, unit]
+        case .backup(let operation):
+            guard operation.range(of: namePattern, options: .regularExpression) != nil else { throw CommandPolicyError.deniedCommand }
+            return [helperPath, "backup", operation]
         }
     }
 }

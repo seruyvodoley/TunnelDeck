@@ -145,3 +145,19 @@ struct DiagnosticResult: Identifiable, Codable, Sendable {
     let summary: String
     let milliseconds: Double?
 }
+
+struct ServerProfile: Identifiable, Codable, Sendable, Hashable {
+    var id = UUID(); var name: String; var host: String; var port: Int; var username: String; var keyPath: String; var role: String
+}
+
+struct HealthIssue: Identifiable, Codable, Sendable, Hashable {
+    let id: String; let title: String; let explanation: String; let technicalDetails: String; let state: HealthState; let fix: String?
+}
+
+struct HealthReport: Codable, Sendable {
+    let date: Date; let state: HealthState; let issues: [HealthIssue]
+}
+
+struct ActivityRecord: Identifiable, Codable, Sendable {
+    let id: UUID; let timestamp: Date; let operation: String; let server: String; let preview: String; let result: String; let rollback: String?
+}

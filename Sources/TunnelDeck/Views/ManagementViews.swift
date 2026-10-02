@@ -47,6 +47,16 @@ struct SettingsView: View {
                 TextField("Private key path", text: $model.settings.keyPath)
                 HStack { Button("Test SSH") { Task { _ = await model.testSSH() } }; Text(model.statusMessage).foregroundStyle(.secondary) }
             }
+            Section("Servers") {
+                if !model.servers.isEmpty {
+                    Picker("Active VPS", selection: Binding(get: { model.activeServerID }, set: { if let id = $0 { model.selectServer(id) } })) {
+                        Text("Select server").tag(UUID?.none)
+                        ForEach(model.servers) { server in Text("\(server.name) · \(server.role)").tag(Optional(server.id)) }
+                    }
+                }
+                Button("Save Current as Primary VPS") { model.saveCurrentServer() }.disabled(model.settings.host.isEmpty)
+                Text("Servers are stored separately. TunnelDeck never copies or migrates configuration between VPS instances.").foregroundStyle(.secondary)
+            }
             Section("Polling") {
                 Toggle("Enable polling", isOn: $model.settings.pollingEnabled)
                 HStack { Text("Interval"); Slider(value: $model.settings.pollingInterval, in: 5...60, step: 5); Text("\(Int(model.settings.pollingInterval)) s") }
