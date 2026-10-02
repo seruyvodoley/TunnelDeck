@@ -69,7 +69,7 @@ enum DNSPathEvaluator {
     }
 
     static func isBlocked(_ answers: [String]) -> Bool {
-        if answers.isEmpty { return true }
+        if answers.isEmpty { return false }
         let normalized = Set(answers.map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() })
         return normalized.isSubset(of: ["0.0.0.0", "::", "::0"])
     }
