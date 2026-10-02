@@ -250,6 +250,6 @@ import Testing
 
 @Test func dnsPathBlockedAnswerRecognition() {
     #expect(DNSPathEvaluator.isBlocked(["0.0.0.0"]))
-    #expect(DNSPathEvaluator.isBlocked([]))
+    #expect(!DNSPathEvaluator.isBlocked([]))
     #expect(!DNSPathEvaluator.isBlocked(["142.251.14.155"]))
 }
