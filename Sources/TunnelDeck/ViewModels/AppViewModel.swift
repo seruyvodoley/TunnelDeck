@@ -34,9 +34,12 @@ final class AppViewModel: ObservableObject {
     @Published var approvedListenerIDs = Set<String>()
     @Published var ignoredPeerIDs = Set<String>()
     @Published var adGuard = AdGuardSnapshot()
+    @Published var dnsPath = DNSPathSnapshot()
+    @Published var isRunningDNSPathTest = false
 
     let ssh = SSHService()
     let adGuardAPI = AdGuardAPIService()
+    let localDNS = LocalDNSService()
     lazy var helper = HelperService(ssh: ssh)
     private let history = DiagnosticHistoryStore()
     private let activityStore = ActivityStore()
@@ -324,6 +327,31 @@ final class AppViewModel: ObservableObject {
             return
         }
         adGuard = await adGuardAPI.load(baseURL: baseURL, username: username, password: password)
+    }
+
+    func runDNSPathTest() async {
+        guard !isRunningDNSPathTest else { return }
+        let adGuardIP = wireGuard.address.split(separator: "/").first.map(String.init) ?? ""
+        guard !adGuardIP.isEmpty, adGuardIP != "—" else {
+            dnsPath = DNSPathSnapshot(ran: true, state: .warning, summary: "WireGuard server address is unavailable.")
+            return
+        }
+
+        isRunningDNSPathTest = true
+        defer { isRunningDNSPathTest = false }
+        let snapshot = await localDNS.test(adGuardIP: adGuardIP)
+        dnsPath = snapshot
+
+        let result = DiagnosticResult(
+            id: UUID(),
+            date: Date(),
+            name: "DNS Path Test",
+            success: snapshot.state == .online,
+            summary: snapshot.summary,
+            milliseconds: nil
+        )
+        await history.append(result)
+        diagnostics = await history.load()
     }
 
     private func detectConfigurationDrift(_ output: String, storeBaseline: Bool) {

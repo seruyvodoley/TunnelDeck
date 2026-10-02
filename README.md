@@ -1,4 +1,4 @@
-# TunnelDeck 1.2.3
+# TunnelDeck 1.2.4
 
 Native macOS control panel for a self-hosted WireGuard, AntiZapret and AdGuard Home VPS. Built with Swift, SwiftUI and the system OpenSSH client—no Electron, embedded terminal, passwords or private keys in the app bundle.
 
@@ -136,6 +136,14 @@ swift test
 ```
 
 `swift test` requires a full Xcode installation because the suite uses Swift Testing macros. The helper tests use system Python and never connect to a production server.
+
+## 1.2.4 AdGuard dashboard and DNS Path Test
+
+- AdGuard Home now shows blocked percentage, last API refresh, top queried/blocked/client lists, active filters and a structured recent-query table with client, status and rule.
+- The AdGuard API refreshes every 15 seconds while its screen is open; credentials remain in Keychain.
+- Diagnostics adds a read-only DNS Path Test comparing macOS system resolvers, the current default gateway, the private AdGuard resolver and Cloudflare DNS.
+- The path test verifies a known advertising domain and reports whether macOS uses AdGuard, whether blocking is active and whether the router resolver bypasses filtering.
+- DNS diagnostics run locally and never change router, macOS or VPS configuration.
 
 ## 1.2.3 Doctor noise reduction
 

@@ -87,31 +87,92 @@ struct DNSView: View {
             VStack(alignment: .leading, spacing: 18) {
                 if dns.contains(where: { $0.isPublic || $0.address == model.settings.host }) {
                     Label("DNS is exposed on a public/wildcard address", systemImage: "exclamationmark.triangle.fill")
-                        .foregroundStyle(.red).padding().background(.red.opacity(0.1), in: RoundedRectangle(cornerRadius: 12))
+                        .foregroundStyle(.red)
+                        .padding()
+                        .background(.red.opacity(0.1), in: RoundedRectangle(cornerRadius: 12))
                 }
+
                 listenerCard("AntiZapret DNS", dns.filter { $0.address.hasPrefix("127.") })
                 listenerCard("AdGuard Home DNS", dns.filter { $0.address == serverIP })
                 listenerCard("Other DNS listeners", dns.filter { !$0.address.hasPrefix("127.") && $0.address != serverIP })
                 listenerCard("AdGuard Web UI", web)
+
                 MetricCard(title: "AdGuard Home API", icon: "chart.bar") {
-                    VStack(alignment: .leading, spacing: 8) {
-                        KeyValueRow(key: "Status", value: model.adGuard.available ? "Available · \(model.adGuard.version)" : (model.adGuard.error ?? "Not loaded"))
-                        KeyValueRow(key: "Queries", value: String(model.adGuard.totalQueries))
-                        KeyValueRow(key: "Blocked", value: String(model.adGuard.blockedQueries))
-                        KeyValueRow(key: "Average processing", value: String(format: "%.3f s", model.adGuard.averageProcessingTime))
-                        Text("Top queried: \(model.adGuard.topQueried.prefix(5).joined(separator: ", "))")
-                        Text("Top blocked: \(model.adGuard.topBlocked.prefix(5).joined(separator: ", "))")
-                        Text("Top clients: \(model.adGuard.topClients.prefix(5).joined(separator: ", "))")
-                        Text("Filters: \(model.adGuard.filters.joined(separator: ", "))")
-                        Text("Recent queries: \(model.adGuard.queryLog.prefix(10).joined(separator: ", "))")
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack(spacing: 28) {
+                            metric("Status", model.adGuard.available ? "Available" : "Unavailable")
+                            metric("Queries", String(model.adGuard.totalQueries))
+                            metric("Blocked", String(model.adGuard.blockedQueries))
+                            metric("Blocked %", String(format: "%.1f%%", model.adGuard.blockedPercentage))
+                            metric("Avg", String(format: "%.3f s", model.adGuard.averageProcessingTime))
+                        }
+
                         HStack {
-                            Button("Login") { state.baseURL = model.discoveredAdGuardBaseURL() ?? ""; state.error = nil; state.showLogin = true }
+                            Text(model.adGuard.available ? "v\(model.adGuard.version)" : (model.adGuard.error ?? "API not connected"))
+                                .foregroundStyle(model.adGuard.available ? .secondary : .orange)
+                            Spacer()
+                            if let updated = model.adGuard.lastUpdated {
+                                Text("Updated \(updated.formatted(date: .omitted, time: .standard))").foregroundStyle(.secondary)
+                            }
+                        }
+
+                        HStack {
+                            Button("Login") {
+                                state.baseURL = model.discoveredAdGuardBaseURL() ?? ""
+                                state.error = nil
+                                state.showLogin = true
+                            }
                             Button("Refresh API") { Task { await model.refreshAdGuardAPI() } }
+                            Button("Open AdGuard") {
+                                if let url = model.discoveredAdGuardBaseURL() { LocalNetworkService.open(url) }
+                            }
+                            .disabled(model.discoveredAdGuardBaseURL() == nil)
                         }
                     }
                 }
-                Button("Open AdGuard") { if let url = model.discoveredAdGuardBaseURL() { LocalNetworkService.open(url) } }.disabled(model.discoveredAdGuardBaseURL() == nil)
-            }.padding(20)
+
+                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())], spacing: 14) {
+                    listCard("Top queried", model.adGuard.topQueried)
+                    listCard("Top blocked", model.adGuard.topBlocked)
+                    listCard("Top clients", model.adGuard.topClients)
+                }
+
+                MetricCard(title: "Filters", icon: "line.3.horizontal.decrease.circle") {
+                    if model.adGuard.filters.isEmpty {
+                        Text("No active filters reported").foregroundStyle(.secondary)
+                    } else {
+                        Text(model.adGuard.filters.joined(separator: " · ")).textSelection(.enabled)
+                    }
+                }
+
+                MetricCard(title: "Recent DNS queries", icon: "list.bullet.rectangle") {
+                    if model.adGuard.queryLog.isEmpty {
+                        Text("No query-log entries loaded").foregroundStyle(.secondary)
+                    } else {
+                        Table(Array(model.adGuard.queryLog.prefix(100))) {
+                            TableColumn("Time") { entry in Text(displayTime(entry.time)).font(.system(.caption, design: .monospaced)) }
+                            TableColumn("Domain", value: \.domain)
+                            TableColumn("Client", value: \.client)
+                            TableColumn("Status") { entry in
+                                HStack(spacing: 6) {
+                                    Image(systemName: entry.blocked ? "hand.raised.fill" : "checkmark.circle.fill")
+                                        .foregroundStyle(entry.blocked ? .orange : .green)
+                                    Text(entry.blocked ? "Blocked" : "Allowed")
+                                }
+                            }
+                            TableColumn("Rule") { entry in Text(entry.rule).lineLimit(1).foregroundStyle(.secondary) }
+                        }
+                        .frame(minHeight: 300, maxHeight: 420)
+                    }
+                }
+            }
+            .padding(20)
+        }
+        .task {
+            while !Task.isCancelled {
+                await model.refreshAdGuardAPI()
+                try? await Task.sleep(for: .seconds(15))
+            }
         }
         .sheet(isPresented: $state.showLogin) {
             VStack(alignment: .leading, spacing: 14) {
@@ -142,8 +203,37 @@ struct DNSView: View {
                     .buttonStyle(.borderedProminent)
                     .disabled(state.connecting || state.baseURL.isEmpty || state.username.isEmpty || state.password.isEmpty)
                 }
-            }.padding(24).frame(width: 520)
+            }
+            .padding(24)
+            .frame(width: 520)
         }
+    }
+
+    private func metric(_ title: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title).font(.caption).foregroundStyle(.secondary)
+            Text(value).font(.title3.bold()).textSelection(.enabled)
+        }
+    }
+
+    private func listCard(_ title: String, _ values: [String]) -> some View {
+        MetricCard(title: title, icon: "chart.bar.xaxis") {
+            VStack(alignment: .leading, spacing: 5) {
+                if values.isEmpty { Text("No data").foregroundStyle(.secondary) }
+                ForEach(Array(values.prefix(8).enumerated()), id: \.offset) { index, value in
+                    Text("\(index + 1). \(value)").lineLimit(1).textSelection(.enabled)
+                }
+            }
+        }
+    }
+
+    private func displayTime(_ value: String) -> String {
+        if value == "—" { return value }
+        if let tIndex = value.firstIndex(of: "T") {
+            let suffix = value[value.index(after: tIndex)...]
+            return String(suffix.prefix(8))
+        }
+        return value
     }
 
     private func listenerCard(_ title: String, _ values: [Listener]) -> some View {
@@ -151,7 +241,12 @@ struct DNSView: View {
             VStack(alignment: .leading, spacing: 8) {
                 if values.isEmpty { Text("Not detected").foregroundStyle(.secondary) }
                 ForEach(values) { item in
-                    HStack { StatusDot(state: item.isPublic ? .warning : .online); Text("\(item.protocolName) · \(item.address):\(item.port)"); Spacer(); Text(item.process).foregroundStyle(.secondary) }
+                    HStack {
+                        StatusDot(state: item.isPublic ? .warning : .online)
+                        Text("\(item.protocolName) · \(item.address):\(item.port)")
+                        Spacer()
+                        Text(item.process).foregroundStyle(.secondary)
+                    }
                 }
             }
         }
@@ -169,9 +264,119 @@ struct DNSView: View {
 
 struct DiagnosticsView: View {
     @EnvironmentObject var model: AppViewModel
-    var body: some View { ScrollView { VStack(alignment: .leading, spacing: 18) { HStack { diagnosticButton("SSH Test", .uname); diagnosticButton("Ping Internet", .pingInternet); diagnosticButton("DNS Resolution", .dnsTest); diagnosticButton("WireGuard Status", .wireGuard); diagnosticButton("Detect iperf3", .iperfDetection) }; GroupBox("Network visibility snapshot") { Grid(alignment: .leading, horizontalSpacing: 20, verticalSpacing: 8) { GridRow { Text("Check").bold(); Text("Expected").bold(); Text("Actual").bold(); Text("Data").bold() }; leakRow("Public IPv4", model.system.publicIPv4, model.system.macPublicIP); leakRow("IPv6", "Disabled or explicitly routed", model.system.publicIPv6); leakRow("VPN DNS", model.wireGuard.address.split(separator: "/").first.map(String.init) ?? "Configured resolver", model.listeners.filter { $0.port == 53 }.map(\.address).joined(separator: ", ")); leakRow("Default route", "Configured policy", model.system.macLANIP) } .padding(8) }; GroupBox("iperf3 — manual only") { HStack { Text("TCP upload/download and UDP tests are intentionally not started automatically."); Spacer(); Button("Run iperf3…") {}.disabled(true) }.padding(8) }; if !model.diagnostics.isEmpty { Chart(model.diagnostics.suffix(30)) { item in BarMark(x: .value("Test", item.date), y: .value("Duration", item.milliseconds ?? 0)).foregroundStyle(item.success ? .green : .red) }.frame(height: 220) }; Table(model.diagnostics.reversed()) { TableColumn("Time") { Text($0.date.formatted(date: .abbreviated, time: .standard)) }; TableColumn("Test", value: \.name); TableColumn("Result") { Text($0.success ? "Passed" : "Failed").foregroundStyle($0.success ? .green : .red) }; TableColumn("Summary", value: \.summary) }.frame(minHeight: 260) }.padding(20) } }
-    private func diagnosticButton(_ title: String, _ command: ReadCommand) -> some View { Button(title) { Task { await model.runDiagnostic(command, name: title) } } }
-    private func leakRow(_ name: String, _ expected: String, _ actual: String) -> some View { GridRow { Text(name); Text(expected).foregroundStyle(.secondary); Text(actual).textSelection(.enabled); Image(systemName: actual.isEmpty || actual == "—" ? "xmark.circle.fill" : "checkmark.circle.fill").foregroundStyle(actual.isEmpty || actual == "—" ? .red : .green) } }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                HStack {
+                    diagnosticButton("SSH Test", .uname)
+                    diagnosticButton("Ping Internet", .pingInternet)
+                    diagnosticButton("DNS Resolution", .dnsTest)
+                    diagnosticButton("WireGuard Status", .wireGuard)
+                    diagnosticButton("Detect iperf3", .iperfDetection)
+                    Button(model.isRunningDNSPathTest ? "Testing DNS Path…" : "DNS Path Test") {
+                        Task { await model.runDNSPathTest() }
+                    }
+                    .disabled(model.isRunningDNSPathTest)
+                }
+
+                GroupBox("Network visibility snapshot") {
+                    Grid(alignment: .leading, horizontalSpacing: 20, verticalSpacing: 8) {
+                        GridRow { Text("Check").bold(); Text("Expected").bold(); Text("Actual").bold(); Text("Data").bold() }
+                        leakRow("Public IPv4", model.system.publicIPv4, model.system.macPublicIP)
+                        leakRow("IPv6", "Disabled or explicitly routed", model.system.publicIPv6)
+                        leakRow("VPN DNS", model.wireGuard.address.split(separator: "/").first.map(String.init) ?? "Configured resolver", model.listeners.filter { $0.port == 53 }.map(\.address).joined(separator: ", "))
+                        leakRow("Default route", "Configured policy", model.system.macLANIP)
+                    }
+                    .padding(8)
+                }
+
+                GroupBox("DNS Path Test") {
+                    VStack(alignment: .leading, spacing: 10) {
+                        if !model.dnsPath.ran {
+                            Text("Run DNS Path Test to compare macOS system resolvers, the local router, AdGuard and a public resolver without changing network settings.")
+                                .foregroundStyle(.secondary)
+                        } else {
+                            HStack {
+                                StatusDot(state: model.dnsPath.state)
+                                Text(model.dnsPath.summary).fontWeight(.semibold)
+                            }
+                            dnsRow("System DNS", model.dnsPath.systemResolvers.joined(separator: ", "))
+                            dnsRow("Router", model.dnsPath.router)
+                            dnsRow("AdGuard", model.dnsPath.adGuard)
+                            dnsRow("Test domain", model.dnsPath.testDomain)
+                            dnsRow("System answer", answerText(model.dnsPath.systemAnswers))
+                            dnsRow("Router answer", answerText(model.dnsPath.routerAnswers))
+                            dnsRow("AdGuard answer", answerText(model.dnsPath.adGuardAnswers))
+                            dnsRow("Public 1.1.1.1", answerText(model.dnsPath.publicAnswers))
+
+                            HStack(spacing: 18) {
+                                Label(model.dnsPath.systemUsesAdGuard ? "Mac uses AdGuard" : "AdGuard not listed in system DNS", systemImage: model.dnsPath.systemUsesAdGuard ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                                    .foregroundStyle(model.dnsPath.systemUsesAdGuard ? .green : .orange)
+                                Label(model.dnsPath.adGuardBlocks ? "Ad blocking confirmed" : "Ad blocking failed", systemImage: model.dnsPath.adGuardBlocks ? "checkmark.circle.fill" : "xmark.octagon.fill")
+                                    .foregroundStyle(model.dnsPath.adGuardBlocks ? .green : .red)
+                                if model.dnsPath.routerBypasses {
+                                    Label("Router DNS bypasses AdGuard", systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                                }
+                            }
+                        }
+                    }
+                    .padding(8)
+                }
+
+                GroupBox("iperf3 — manual only") {
+                    HStack {
+                        Text("TCP upload/download and UDP tests are intentionally not started automatically.")
+                        Spacer()
+                        Button("Run iperf3…") {}.disabled(true)
+                    }
+                    .padding(8)
+                }
+
+                if !model.diagnostics.isEmpty {
+                    Chart(model.diagnostics.suffix(30)) { item in
+                        BarMark(x: .value("Test", item.date), y: .value("Duration", item.milliseconds ?? 0))
+                            .foregroundStyle(item.success ? .green : .red)
+                    }
+                    .frame(height: 220)
+                }
+
+                Table(model.diagnostics.reversed()) {
+                    TableColumn("Time") { Text($0.date.formatted(date: .abbreviated, time: .standard)) }
+                    TableColumn("Test", value: \.name)
+                    TableColumn("Result") { Text($0.success ? "Passed" : "Failed").foregroundStyle($0.success ? .green : .red) }
+                    TableColumn("Summary", value: \.summary)
+                }
+                .frame(minHeight: 260)
+            }
+            .padding(20)
+        }
+    }
+
+    private func diagnosticButton(_ title: String, _ command: ReadCommand) -> some View {
+        Button(title) { Task { await model.runDiagnostic(command, name: title) } }
+    }
+
+    private func leakRow(_ name: String, _ expected: String, _ actual: String) -> some View {
+        GridRow {
+            Text(name)
+            Text(expected).foregroundStyle(.secondary)
+            Text(actual).textSelection(.enabled)
+            Image(systemName: actual.isEmpty || actual == "—" ? "xmark.circle.fill" : "checkmark.circle.fill")
+                .foregroundStyle(actual.isEmpty || actual == "—" ? .red : .green)
+        }
+    }
+
+    private func dnsRow(_ name: String, _ value: String) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(name).foregroundStyle(.secondary).frame(width: 120, alignment: .leading)
+            Text(value.isEmpty ? "—" : value).textSelection(.enabled)
+        }
+    }
+
+    private func answerText(_ values: [String]) -> String {
+        values.isEmpty ? "No answer" : values.joined(separator: ", ")
+    }
 }
 
 struct RouterView: View {

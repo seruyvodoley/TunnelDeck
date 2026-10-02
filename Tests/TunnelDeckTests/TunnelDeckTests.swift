@@ -198,3 +198,58 @@ import Testing
     let ignored = HealthEvaluator.report(results: results, listeners: [], system: system, wireGuard: wg, host: "203.0.113.10", ignoredPeerIDs: ["peer-key"])
     #expect(!ignored.issues.contains { $0.id == "peer-never-peer-key" })
 }
+
+@Test func adGuardQueryLogParsingAndBlockedPercentage() {
+    let payload: [String: Any] = [
+        "data": [
+            [
+                "time": "2026-10-03T04:43:26Z",
+                "client": "10.66.66.2",
+                "question": ["name": "beacons.gvt2.com"],
+                "reason": "FilteredBlackList",
+                "rules": [["text": "||gvt2.com^"]]
+            ],
+            [
+                "time": "2026-10-03T04:43:25Z",
+                "client": "10.66.66.2",
+                "question": ["name": "github.com"],
+                "reason": "NotFilteredNotFound"
+            ]
+        ]
+    ]
+    let entries = AdGuardAPIService.parseQueryLog(payload)
+    #expect(entries.count == 2)
+    #expect(entries[0].domain == "beacons.gvt2.com")
+    #expect(entries[0].blocked)
+    #expect(entries[0].rule == "||gvt2.com^")
+    #expect(!entries[1].blocked)
+
+    var snapshot = AdGuardSnapshot()
+    snapshot.totalQueries = 200
+    snapshot.blockedQueries = 50
+    #expect(snapshot.blockedPercentage == 25)
+}
+
+@Test func dnsPathEvaluationDetectsRouterBypass() {
+    let snapshot = DNSPathEvaluator.evaluate(
+        systemResolvers: ["10.66.66.1", "192.168.0.1"],
+        router: "192.168.0.1",
+        adGuard: "10.66.66.1",
+        testDomain: "pagead2.googlesyndication.com",
+        systemAnswers: ["0.0.0.0"],
+        routerAnswers: ["142.251.14.155"],
+        adGuardAnswers: ["0.0.0.0"],
+        publicAnswers: ["142.251.14.155"]
+    )
+    #expect(snapshot.state == .online)
+    #expect(snapshot.systemUsesAdGuard)
+    #expect(snapshot.adGuardBlocks)
+    #expect(snapshot.routerBypasses)
+    #expect(snapshot.summary.contains("router DNS still bypasses"))
+}
+
+@Test func dnsPathBlockedAnswerRecognition() {
+    #expect(DNSPathEvaluator.isBlocked(["0.0.0.0"]))
+    #expect(DNSPathEvaluator.isBlocked([]))
+    #expect(!DNSPathEvaluator.isBlocked(["142.251.14.155"]))
+}
