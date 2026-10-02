@@ -72,7 +72,10 @@ actor HelperService {
 
     func restoreApply(identifier: String, type: String, configuration: SSHConfiguration) async throws -> RestoreResult {
         let result = try await ssh.executeHelper(.restoreApply(identifier: identifier, type: type), configuration: configuration)
-        guard result.succeeded else { throw NSError(domain: "TunnelDeck.Helper", code: Int(result.exitCode), userInfo: [NSLocalizedDescriptionKey: result.stdout + result.stderr]) }
+        if !result.succeeded {
+            if let payload = try? JSONDecoder().decode(RestoreFailurePayload.self, from: Data(result.stdout.utf8)) { throw RestoreOperationFailure(payload: payload) }
+            throw NSError(domain: "TunnelDeck.Helper", code: Int(result.exitCode), userInfo: [NSLocalizedDescriptionKey: result.stdout + result.stderr])
+        }
         return try JSONDecoder().decode(RestoreResult.self, from: Data(result.stdout.utf8))
     }
 }

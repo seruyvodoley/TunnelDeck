@@ -1,4 +1,4 @@
-# TunnelDeck 1.2
+# TunnelDeck 1.2.1
 
 Native macOS control panel for a self-hosted WireGuard, AntiZapret and AdGuard Home VPS. Built with Swift, SwiftUI and the system OpenSSH client—no Electron, embedded terminal, passwords or private keys in the app bundle.
 

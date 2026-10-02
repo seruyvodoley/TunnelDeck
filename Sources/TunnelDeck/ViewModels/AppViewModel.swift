@@ -296,9 +296,19 @@ final class AppViewModel: ObservableObject {
             let result = try await helper.restoreApply(identifier: preview.backup, type: preview.type, configuration: configuration)
             await activityStore.append(operation: "Restore", server: settings.host, preview: "\(preview.type): \(preview.files.count) verified files", result: "success", rollback: "available: \(result.rollbackBackup)")
             activity = await activityStore.load(); restorePreview = nil; await refresh(); return true
+        } catch let failure as RestoreOperationFailure {
+            let payload = failure.payload
+            await activityStore.append(operation: "Restore", server: settings.host, preview: preview.type, result: "failed: \(payload.originalError)", rollback: payload.rollbackStatus == "success" ? "success" : "failed: \(payload.rollbackError ?? "unknown")")
+            activity = await activityStore.load()
+            if payload.critical {
+                presentedError = AppError(title: "CRITICAL: Restore failed — rollback failed", message: "The \(payload.restoreType) service may be unhealthy. Open the independent VPS console immediately.", technicalDetails: SecretRedactor.redact("Backup: \(payload.backup)\nRollback backup: \(payload.rollbackBackup)\nOriginal error: \(payload.originalError)\nRollback error: \(payload.rollbackError ?? "unknown")"), recommendedAction: "Open the VPS provider console. Do not retry restore until the affected service and rollback backup are inspected.")
+            } else {
+                presentedError = AppError(title: "Restore failed — rollback succeeded", message: "The previous \(payload.restoreType) configuration was restored and its health check passed.", technicalDetails: SecretRedactor.redact("Original error: \(payload.originalError)\nRollback backup: \(payload.rollbackBackup)"), recommendedAction: "Review the restore preview and service logs before retrying.")
+            }
+            return false
         } catch {
-            await activityStore.append(operation: "Restore", server: settings.host, preview: preview.type, result: "failed", rollback: "helper rollback requested")
-            activity = await activityStore.load(); presentedError = AppError(title: "Restore failed", message: "The helper rejected or rolled back the restore.", technicalDetails: SecretRedactor.redact(error.localizedDescription), recommendedAction: "Review Activity and helper health; do not retry until the cause is understood."); return false
+            await activityStore.append(operation: "Restore", server: settings.host, preview: preview.type, result: "failed", rollback: "status unavailable")
+            activity = await activityStore.load(); presentedError = AppError(title: "Restore failed", message: "The helper returned an unstructured restore error.", technicalDetails: SecretRedactor.redact(error.localizedDescription), recommendedAction: "Review helper health and use the independent VPS console if the service is unavailable."); return false
         }
     }
 

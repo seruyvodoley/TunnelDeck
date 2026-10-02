@@ -5,6 +5,8 @@ import tempfile
 import unittest
 import hashlib
 import json
+from types import SimpleNamespace
+from unittest import mock
 
 path = pathlib.Path(__file__).parents[1] / "ServerHelper" / "tunneldeck-helper"
 loader = importlib.machinery.SourceFileLoader("tunneldeck_helper", str(path))
@@ -98,6 +100,61 @@ class HelperValidationTests(unittest.TestCase):
                 source = backup / "etc/wireguard/wg0.conf"; source.unlink(); source.symlink_to("/etc/hosts")
                 with self.assertRaises(helper.HelperError): helper.load_verified_manifest("safe_backup")
             finally: helper.BACKUP_ROOT = original
+
+    def restore_fixture(self, directory, restore_type):
+        source = pathlib.Path(directory) / "backup-file"; source.write_text("previous")
+        target = pathlib.Path(directory) / "target"; target.write_text("current")
+        selected = [({"path": str(target), "sha256": hashlib.sha256(source.read_bytes()).hexdigest()}, source, target)]
+        rollback = pathlib.Path(directory) / "pre-restore"
+        return source, target, selected, rollback
+
+    def test_failed_adguard_restore_restores_file_and_restarts_service(self):
+        with tempfile.TemporaryDirectory() as directory:
+            _, _, selected, rollback = self.restore_fixture(directory, "adguard")
+            calls = []
+            def fake_run(arguments, **kwargs):
+                calls.append(arguments)
+                if arguments[:2] == ["systemctl", "is-active"]: return SimpleNamespace(stdout="active\n", returncode=0, stderr="")
+                if arguments[0] == "ss": return SimpleNamespace(stdout="tcp LISTEN 0 1 127.0.0.1:53 users:((\"AdGuardHome\"))", returncode=0, stderr="")
+                return SimpleNamespace(stdout="", returncode=0, stderr="")
+            with mock.patch.object(helper, "restore_entries", return_value=(None, None, selected)), mock.patch.object(helper, "create_backup", return_value=rollback), mock.patch.object(helper, "atomic_restore") as atomic, mock.patch.object(helper, "validate_restored_configuration", side_effect=[helper.HelperError("bad restored yaml"), None]), mock.patch.object(helper, "run", side_effect=fake_run):
+                with self.assertRaises(helper.RestoreFailure) as caught: helper.restore_apply("backup", "adguard")
+            self.assertIsNone(caught.exception.rollback_error); self.assertEqual(atomic.call_count, 2)
+            self.assertIn(["systemctl", "restart", "AdGuardHome.service"], calls)
+
+    def test_failed_antizapret_restore_restores_files_and_restarts_service(self):
+        with tempfile.TemporaryDirectory() as directory:
+            _, _, selected, rollback = self.restore_fixture(directory, "antizapret")
+            calls = []
+            def fake_run(arguments, **kwargs):
+                calls.append(arguments)
+                return SimpleNamespace(stdout="active\n" if arguments[:2] == ["systemctl", "is-active"] else "", returncode=0, stderr="")
+            with mock.patch.object(helper, "restore_entries", return_value=(None, None, selected)), mock.patch.object(helper, "create_backup", return_value=rollback), mock.patch.object(helper, "atomic_restore") as atomic, mock.patch.object(helper, "validate_restored_configuration", side_effect=[helper.HelperError("restore failed"), None]), mock.patch.object(helper, "run", side_effect=fake_run):
+                with self.assertRaises(helper.RestoreFailure) as caught: helper.restore_apply("backup", "antizapret")
+            self.assertIsNone(caught.exception.rollback_error); self.assertEqual(atomic.call_count, 2)
+            self.assertIn(["systemctl", "restart", "antizapret.service"], calls)
+
+    def test_double_failure_preserves_original_and_rollback_errors(self):
+        with tempfile.TemporaryDirectory() as directory:
+            _, _, selected, rollback = self.restore_fixture(directory, "wireguard")
+            with mock.patch.object(helper, "restore_entries", return_value=(None, None, selected)), mock.patch.object(helper, "create_backup", return_value=rollback), mock.patch.object(helper, "atomic_restore"), mock.patch.object(helper, "validate_wg_config"), mock.patch.object(helper, "validate_restored_configuration"), mock.patch.object(helper, "activate_and_check", side_effect=[helper.HelperError("original restore error"), helper.HelperError("rollback health error")]):
+                with self.assertRaises(helper.RestoreFailure) as caught: helper.restore_apply("backup", "wireguard")
+            payload = caught.exception.payload()
+            self.assertEqual(payload["rollbackStatus"], "failed"); self.assertTrue(payload["critical"])
+            self.assertIn("original restore error", payload["originalError"]); self.assertIn("rollback health error", payload["rollbackError"])
+
+    def test_wireguard_rollback_health_syncs_and_checks_interface(self):
+        with mock.patch.object(helper, "sync_wg_config") as sync, mock.patch.object(helper, "snapshot_health", return_value={"wg0": "active", "addressPresent": True, "listenPort": "51820"}):
+            helper.activate_and_check("wireguard")
+        sync.assert_called_once_with(helper.WG_CONFIG)
+
+    def test_rollback_health_failure_is_not_success(self):
+        def fake_run(arguments, **kwargs):
+            if arguments[:2] == ["systemctl", "is-active"]: return SimpleNamespace(stdout="active\n", returncode=0, stderr="")
+            if arguments[0] == "ss": return SimpleNamespace(stdout="", returncode=0, stderr="")
+            return SimpleNamespace(stdout="", returncode=0, stderr="")
+        with mock.patch.object(helper, "run", side_effect=fake_run):
+            with self.assertRaises(helper.HelperError): helper.activate_and_check("adguard")
 
 
 if __name__ == "__main__":

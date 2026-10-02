@@ -1,6 +1,6 @@
 # TunnelDeck Server Helper
 
-Version: `1.2.0`
+Version: `1.2.1`
 
 Target path: `/usr/local/libexec/tunneldeck-helper`
 
@@ -18,6 +18,8 @@ The helper must be reviewed, copied with SCP, installed as `root:root` mode `075
 - `wg-list` — peers with TunnelDeck metadata
 
 Restore never accepts arbitrary source or destination paths. Manifest paths are confined and hash-verified, targets are mapped to typed allowlists, and every apply creates a rollback backup before atomic replacement and service validation.
+
+Rollback is service-aware: WireGuard is validated and synced with interface health checks; AdGuard Home is restarted and checked for active state plus a DNS listener; AntiZapret is restarted and checked for active state. Double failures return both the original restore error and rollback error together with the pre-restore backup path.
 - `wg-add-peer --name --ip --dns --mtu --allowed-ips --endpoint`
 - `wg-remove-peer --public-key [--delete-client] [--allow-existing]`
 - `wg-client-config --name` — sensitive output; never log

@@ -15,9 +15,10 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 
-VERSION = "1.2.0"
+VERSION = "1.2.1"
 WG_CONFIG = Path("/etc/wireguard/wg0.conf")
 WG_INTERFACE = "wg0"
 BACKUP_ROOT = Path("/root/tunneldeck-backups")
@@ -31,6 +32,19 @@ FULL_BACKUP_FILES = [WG_CONFIG, METADATA_PATH, Path("/root/antizapret/setup"), P
 
 class HelperError(RuntimeError):
     pass
+
+
+class RestoreFailure(HelperError):
+    def __init__(self, original_error, rollback_error, rollback_backup, restore_type, backup):
+        self.original_error = str(original_error)
+        self.rollback_error = str(rollback_error) if rollback_error else None
+        self.rollback_backup = str(rollback_backup)
+        self.restore_type = restore_type
+        self.backup = backup
+        super().__init__(self.original_error)
+
+    def payload(self):
+        return {"error": "restore_failed", "originalError": self.original_error, "rollbackStatus": "failed" if self.rollback_error else "success", "rollbackError": self.rollback_error, "rollbackBackup": self.rollback_backup, "restoreType": self.restore_type, "backup": self.backup, "critical": self.rollback_error is not None}
 
 
 def run(arguments, *, input_text=None, check=True):
@@ -280,6 +294,41 @@ def atomic_restore(source, target):
         if os.path.exists(temporary_name): os.unlink(temporary_name)
 
 
+def wait_service_active(unit, timeout=10):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if run(["systemctl", "is-active", unit], check=False).stdout.strip() == "active":
+            return
+        time.sleep(0.5)
+    raise HelperError(f"{unit} did not become active within {timeout} seconds")
+
+
+def validate_restored_configuration(restore_type):
+    if restore_type == "wireguard":
+        validate_wg_config(WG_CONFIG)
+    elif restore_type == "adguard":
+        config = Path("/opt/AdGuardHome/AdGuardHome.yaml")
+        if not config.exists() or not config.is_file() or config.is_symlink():
+            raise HelperError("restored AdGuardHome.yaml is missing, not regular, or a symlink")
+
+
+def activate_and_check(restore_type):
+    if restore_type == "wireguard":
+        sync_wg_config(WG_CONFIG)
+        health = snapshot_health()
+        if health["wg0"] != "active" or not health["addressPresent"] or not health["listenPort"]:
+            raise HelperError("wg0 failed interface health after sync")
+    elif restore_type == "adguard":
+        run(["systemctl", "restart", "AdGuardHome.service"])
+        wait_service_active("AdGuardHome.service")
+        sockets = run(["ss", "-H", "-lntup"], check=False).stdout
+        if "AdGuardHome" not in sockets or ":53" not in sockets:
+            raise HelperError("AdGuardHome is active but its DNS listener health check failed")
+    else:
+        run(["systemctl", "restart", "antizapret.service"])
+        wait_service_active("antizapret.service")
+
+
 def restore_apply(identifier, restore_type):
     _, _, selected = restore_entries(identifier, restore_type)
     if restore_type == "wireguard":
@@ -290,23 +339,21 @@ def restore_apply(identifier, restore_type):
     rollback = create_backup("pre-restore", targets)
     try:
         for _, source, target in selected: atomic_restore(source, target)
-        if restore_type == "wireguard":
-            validate_wg_config(WG_CONFIG); sync_wg_config(WG_CONFIG)
-            if snapshot_health()["wg0"] != "active": raise HelperError("wg0 failed post-restore health")
-        elif restore_type == "adguard":
-            run(["systemctl", "restart", "AdGuardHome.service"])
-            if run(["systemctl", "is-active", "AdGuardHome.service"], check=False).stdout.strip() != "active": raise HelperError("AdGuardHome failed post-restore health")
-        else:
-            run(["systemctl", "restart", "antizapret.service"])
-            if run(["systemctl", "is-active", "antizapret.service"], check=False).stdout.strip() != "active": raise HelperError("AntiZapret failed post-restore health")
+        validate_restored_configuration(restore_type)
+        activate_and_check(restore_type)
         return {"restored": identifier, "type": restore_type, "rollbackBackup": str(rollback), "health": snapshot_health()}
-    except Exception as error:
-        _, _, rollback_entries = restore_entries(rollback.name, restore_type)
-        for _, source, target in rollback_entries: atomic_restore(source, target)
-        for target in targets:
-            if not existed[str(target)] and target.exists(): target.unlink()
-        if restore_type == "wireguard": sync_wg_config(WG_CONFIG)
-        raise HelperError(f"restore failed; rollback completed: {error}") from error
+    except Exception as original_error:
+        rollback_error = None
+        try:
+            _, _, rollback_entries = restore_entries(rollback.name, restore_type)
+            for _, source, target in rollback_entries: atomic_restore(source, target)
+            for target in targets:
+                if not existed[str(target)] and target.exists(): target.unlink()
+            validate_restored_configuration(restore_type)
+            activate_and_check(restore_type)
+        except Exception as error:
+            rollback_error = error
+        raise RestoreFailure(original_error, rollback_error, rollback, restore_type, identifier) from original_error
 
 
 def validate_wg_config(path):
@@ -557,6 +604,9 @@ def main():
 if __name__ == "__main__":
     try:
         main()
+    except RestoreFailure as error:
+        print(json.dumps(error.payload(), indent=2))
+        raise SystemExit(3)
     except (HelperError, ValueError, json.JSONDecodeError) as error:
         print(json.dumps({"error": str(error)}))
         raise SystemExit(2)

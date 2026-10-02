@@ -165,3 +165,13 @@ struct ActivityRecord: Identifiable, Codable, Sendable {
 struct RestorePreviewFile: Codable, Sendable, Identifiable { var id: String { path }; let path: String; let currentSha256: String?; let backupSha256: String; let changed: Bool; let diffSummary: String }
 struct RestorePreview: Codable, Sendable { let backup: String; let timestamp: String; let operation: String; let type: String; let files: [RestorePreviewFile]; let verified: Bool }
 struct RestoreResult: Codable, Sendable { let restored: String; let type: String; let rollbackBackup: String }
+struct RestoreFailurePayload: Codable, Sendable { let error: String; let originalError: String; let rollbackStatus: String; let rollbackError: String?; let rollbackBackup: String; let restoreType: String; let backup: String; let critical: Bool }
+
+struct RestoreOperationFailure: Error, LocalizedError, Sendable {
+    let payload: RestoreFailurePayload
+    var errorDescription: String? {
+        var message = "Restore failed: \(payload.originalError)\n\nRollback: \(payload.rollbackStatus.uppercased())"
+        if let rollbackError = payload.rollbackError { message += "\nRollback error: \(rollbackError)" }
+        return message
+    }
+}
