@@ -59,7 +59,7 @@ struct SettingsView: View {
             }
             Section("Polling") {
                 Toggle("Enable polling", isOn: $model.settings.pollingEnabled)
-                HStack { Text("Interval"); Slider(value: $model.settings.pollingInterval, in: 5...60, step: 5); Text("\(Int(model.settings.pollingInterval)) s") }
+                HStack { Text("Interval"); Slider(value: $model.settings.pollingInterval, in: 5...300, step: 5); Text("\(Int(model.settings.pollingInterval)) s") }
                 HStack { Text("Peer online timeout"); Slider(value: $model.settings.handshakeTimeout, in: 60...600, step: 30); Text("\(Int(model.settings.handshakeTimeout)) s") }
             }
             Section("Safety") {
@@ -149,7 +149,7 @@ struct MenuBarView: View {
             Button("Refresh") { Task { await model.refresh() } }
             Button("Test Connection") { Task { _ = await model.testSSH() } }
             Button("Open Router Settings") { NSApp.activate(ignoringOtherApps: true); model.selectedSection = .router }
-            Button("Open AdGuard") { if let ip = model.wireGuard.address.split(separator: "/").first { LocalNetworkService.open("http://\(ip):3000") } }
+            Button("Open AdGuard") { if let url = model.discoveredAdGuardBaseURL() { LocalNetworkService.open(url) } }.disabled(model.discoveredAdGuardBaseURL() == nil)
             Button("Restart WG") {}.disabled(true)
             Divider()
             Button("Quit") { NSApp.terminate(nil) }
