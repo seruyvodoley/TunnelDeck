@@ -73,13 +73,14 @@ struct SecurityView: View {
 
 struct BackupsView: View {
     @EnvironmentObject var model: AppViewModel
+    @StateObject private var state = BackupScreenState()
     var body: some View {
         VStack(spacing: 0) {
             HStack {
                 Text("Server Backups").font(.title2.bold())
                 Spacer()
                 if let helperVersion = model.helperVersion { Text("Helper \(helperVersion)").foregroundStyle(.secondary) }
-                Button("Create Emergency Kit") { model.createEmergencyKit() }
+                Button("Create Emergency Kit") { state.showEmergencyKit = true }
                 Button("Backup Now") { Task { _ = await model.createBackup(operation: "manual") } }.disabled(!model.settings.writeModeEnabled || model.helperVersion != HelperService.localVersion)
                 Button("Refresh") { Task { await model.refreshHelper() } }
             }.padding()
@@ -92,10 +93,32 @@ struct BackupsView: View {
                     TableColumn("Host", value: \.hostname)
                     TableColumn("Files") { Text(String($0.files.count)) }
                     TableColumn("Size") { Text(ByteCountFormatter.string(fromByteCount: $0.size, countStyle: .file)) }
-                    TableColumn("Actions") { backup in HStack { Button("Download") { Task { await model.downloadBackup(backup) } }; Button("Restore") {}.disabled(true) } }
+                    TableColumn("Actions") { backup in HStack { Button("Download") { Task { await model.downloadBackup(backup) } }; Button("Preview Restore") { state.selectedBackup = backup; Task { await model.previewRestore(backup, type: state.restoreType); state.showRestore = model.restorePreview != nil } }.disabled(model.helperVersion != HelperService.localVersion) } }
                 }
-                Text("Restore remains unavailable until helper restore preview and rollback validation are present on the server.").font(.caption).foregroundStyle(.secondary).padding(8)
+                Picker("Restore type", selection: $state.restoreType) { Text("WireGuard").tag("wireguard"); Text("AdGuard").tag("adguard"); Text("AntiZapret").tag("antizapret") }.pickerStyle(.segmented).padding(8)
             }
         }
+        .sheet(isPresented: $state.showEmergencyKit) { EmergencyKitSheet(state: state) { model.createEmergencyKit(includeClientCredentials: false); state.showEmergencyKit = false } }
+        .sheet(isPresented: $state.showRestore) { if let preview = model.restorePreview { RestorePreviewSheet(preview: preview, canRestore: model.settings.writeModeEnabled) { Task { if await model.applyRestore() { state.showRestore = false } } } cancel: { state.showRestore = false } } }
     }
+}
+
+@MainActor private final class BackupScreenState: ObservableObject { @Published var showEmergencyKit = false; @Published var includeCredentials = false; @Published var showRestore = false; @Published var restoreType = "wireguard"; @Published var selectedBackup: BackupRecord? }
+
+private struct EmergencyKitSheet: View {
+    @ObservedObject var state: BackupScreenState
+    let create: () -> Void
+    var body: some View { VStack(alignment: .leading, spacing: 16) {
+        Text("Emergency Kit Contents").font(.title2.bold())
+        GroupBox("Public recovery data") { VStack(alignment: .leading) { Label("Endpoint and public server metadata", systemImage: "checkmark.circle"); Label("Health report and recovery notes", systemImage: "checkmark.circle"); Label("Latest backup manifest reference", systemImage: "checkmark.circle") }.padding(8) }
+        Toggle("Include client VPN credentials", isOn: $state.includeCredentials).disabled(true)
+        Text("Client VPN configurations contain private credentials. The Emergency Kit must be encrypted. TunnelDeck does not currently have a verified non-interactive encrypted container implementation, so secret profiles cannot be included.").foregroundStyle(.orange)
+        Label("Server WireGuard private keys and SSH private keys are never included.", systemImage: "lock.shield.fill").foregroundStyle(.green)
+        HStack { Spacer(); Button("Cancel") { state.showEmergencyKit = false }; Button("Create Public-Only Kit", action: create).buttonStyle(.borderedProminent) }
+    }.padding(24).frame(width: 560) }
+}
+
+private struct RestorePreviewSheet: View {
+    let preview: RestorePreview; let canRestore: Bool; let restore: () -> Void; let cancel: () -> Void
+    var body: some View { VStack(alignment: .leading, spacing: 14) { Text("Preview Restore").font(.title2.bold()); KeyValueRow(key: "Backup", value: preview.backup); KeyValueRow(key: "Timestamp", value: preview.timestamp); KeyValueRow(key: "Operation", value: preview.operation); KeyValueRow(key: "Type", value: preview.type); Table(preview.files) { TableColumn("File", value: \.path); TableColumn("Current hash") { Text($0.currentSha256?.prefix(12) ?? "missing") }; TableColumn("Backup hash") { Text($0.backupSha256.prefix(12)) }; TableColumn("Diff", value: \.diffSummary) }.frame(height: 220); Label("Manifest paths and SHA-256 were verified. A current-state backup will be created before restore.", systemImage: "checkmark.shield.fill").foregroundStyle(.green); HStack { Spacer(); Button("Cancel", action: cancel); Button("Restore verified files", role: .destructive, action: restore).disabled(!canRestore) } }.padding(24).frame(width: 850) }
 }

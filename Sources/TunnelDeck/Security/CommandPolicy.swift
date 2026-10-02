@@ -19,7 +19,7 @@ enum ReadCommand: String, CaseIterable, Sendable {
     case listeners = "ss -H -lntup"
     case antiZapretSettings = "grep -R -h -E '^(ROUTE_ALL|TELEGRAM_INCLUDE|WHATSAPP_INCLUDE|CLOUDFLARE_INCLUDE|WIREGUARD_ENABLE|OPENVPN_UDP_ENABLE|OPENVPN_TCP_ENABLE|OPENVPN_DCO|RESTRICT_FORWARD)=' /root/antizapret/setup"
     case antiZapretFiles = "find /root/antizapret/result -maxdepth 2 -type f -printf '%p|%s|%TY-%Tm-%TdT%TH:%TM:%TS\\n'"
-    case profiles = "find /root /root/antizapret/client -type f -name '*.conf' -o -name '*.ovpn' -printf '%p|%s|%TY-%Tm-%TdT%TH:%TM:%TS\\n'"
+    case profiles = "find /root /root/antizapret/client -type f \\( -name '*.conf' -o -name '*.ovpn' \\) -printf '%p|%s|%TY-%Tm-%TdT%TH:%TM:%TS\\n'"
     case pingInternet = "ping -c 3 -W 2 1.1.1.1"
     case dnsTest = "getent ahostsv4 example.com"
     case iperfDetection = "command -v iperf3"
@@ -79,6 +79,9 @@ enum WriteHelperCommand: Sendable, Equatable {
     case clientConfig(name: String)
     case service(action: String, unit: String)
     case backup(operation: String)
+    case backupVerify(identifier: String)
+    case restorePreview(identifier: String, type: String)
+    case restoreApply(identifier: String, type: String)
 }
 
 enum WriteCommandPolicy {
@@ -110,6 +113,15 @@ enum WriteCommandPolicy {
         case .backup(let operation):
             guard operation.range(of: namePattern, options: .regularExpression) != nil else { throw CommandPolicyError.deniedCommand }
             return [helperPath, "backup", operation]
+        case .backupVerify(let identifier):
+            guard identifier.range(of: namePattern, options: .regularExpression) != nil else { throw CommandPolicyError.deniedCommand }
+            return [helperPath, "backup-verify", identifier]
+        case .restorePreview(let identifier, let type):
+            guard identifier.range(of: namePattern, options: .regularExpression) != nil, ["wireguard", "adguard", "antizapret"].contains(type) else { throw CommandPolicyError.deniedCommand }
+            return [helperPath, "restore-preview", identifier, "--type", type]
+        case .restoreApply(let identifier, let type):
+            guard identifier.range(of: namePattern, options: .regularExpression) != nil, ["wireguard", "adguard", "antizapret"].contains(type) else { throw CommandPolicyError.deniedCommand }
+            return [helperPath, "restore-apply", identifier, "--type", type, "--confirm", "RESTORE"]
         }
     }
 }

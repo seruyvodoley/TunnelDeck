@@ -3,6 +3,8 @@ import importlib.util
 import pathlib
 import tempfile
 import unittest
+import hashlib
+import json
 
 path = pathlib.Path(__file__).parents[1] / "ServerHelper" / "tunneldeck-helper"
 loader = importlib.machinery.SourceFileLoader("tunneldeck_helper", str(path))
@@ -12,6 +14,14 @@ loader.exec_module(helper)
 
 
 class HelperValidationTests(unittest.TestCase):
+    def make_backup(self, root, identifier="safe_backup", target="/etc/wireguard/wg0.conf", relative="etc/wireguard/wg0.conf", content=b"[Interface]\nAddress = 10.8.0.1/24\n"):
+        directory = pathlib.Path(root) / identifier
+        source = directory / relative
+        source.parent.mkdir(parents=True)
+        source.write_bytes(content)
+        manifest = {"timestamp": "2026-01-01T00:00:00Z", "operation": "test", "files": [{"path": target, "backupPath": relative, "sha256": hashlib.sha256(content).hexdigest(), "size": len(content)}]}
+        (directory / "manifest.json").write_text(json.dumps(manifest))
+        return directory
     def test_peer_name(self):
         self.assertEqual(helper.validate_name("MacBook_01"), "MacBook_01")
         for invalid in ["", "bad name", "../escape", "x" * 49]:
@@ -58,6 +68,36 @@ class HelperValidationTests(unittest.TestCase):
                 self.assertEqual(len(list(helper.BACKUP_ROOT.iterdir())), 14)
             finally:
                 helper.BACKUP_ROOT = original
+
+    def test_restore_preview_and_hash_verification(self):
+        with tempfile.TemporaryDirectory() as directory:
+            original_root, original_wg = helper.BACKUP_ROOT, helper.WG_CONFIG
+            helper.BACKUP_ROOT = pathlib.Path(directory) / "backups"; helper.BACKUP_ROOT.mkdir()
+            helper.WG_CONFIG = pathlib.Path(directory) / "wg0.conf"; helper.WG_CONFIG.write_text("[Interface]\nAddress = 10.8.0.1/24\n# current\n")
+            try:
+                self.make_backup(helper.BACKUP_ROOT, target=str(helper.WG_CONFIG))
+                preview = helper.restore_preview("safe_backup", "wireguard")
+                self.assertTrue(preview["verified"]); self.assertTrue(preview["files"][0]["changed"])
+            finally: helper.BACKUP_ROOT, helper.WG_CONFIG = original_root, original_wg
+
+    def test_restore_rejects_hash_mismatch_and_traversal(self):
+        with tempfile.TemporaryDirectory() as directory:
+            original = helper.BACKUP_ROOT; helper.BACKUP_ROOT = pathlib.Path(directory); backup = self.make_backup(directory)
+            try:
+                (backup / "etc/wireguard/wg0.conf").write_text("tampered")
+                with self.assertRaises(helper.HelperError): helper.load_verified_manifest("safe_backup")
+                manifest = json.loads((backup / "manifest.json").read_text()); manifest["files"][0]["backupPath"] = "../escape"; (backup / "manifest.json").write_text(json.dumps(manifest))
+                with self.assertRaises(helper.HelperError): helper.load_verified_manifest("safe_backup")
+            finally: helper.BACKUP_ROOT = original
+
+    def test_restore_rejects_symlink_and_unknown_target(self):
+        with tempfile.TemporaryDirectory() as directory:
+            original = helper.BACKUP_ROOT; helper.BACKUP_ROOT = pathlib.Path(directory); backup = self.make_backup(directory, target="/etc/shadow")
+            try:
+                with self.assertRaises(helper.HelperError): helper.restore_entries("safe_backup", "wireguard")
+                source = backup / "etc/wireguard/wg0.conf"; source.unlink(); source.symlink_to("/etc/hosts")
+                with self.assertRaises(helper.HelperError): helper.load_verified_manifest("safe_backup")
+            finally: helper.BACKUP_ROOT = original
 
 
 if __name__ == "__main__":

@@ -161,3 +161,7 @@ struct HealthReport: Codable, Sendable {
 struct ActivityRecord: Identifiable, Codable, Sendable {
     let id: UUID; let timestamp: Date; let operation: String; let server: String; let preview: String; let result: String; let rollback: String?
 }
+
+struct RestorePreviewFile: Codable, Sendable, Identifiable { var id: String { path }; let path: String; let currentSha256: String?; let backupSha256: String; let changed: Bool; let diffSummary: String }
+struct RestorePreview: Codable, Sendable { let backup: String; let timestamp: String; let operation: String; let type: String; let files: [RestorePreviewFile]; let verified: Bool }
+struct RestoreResult: Codable, Sendable { let restored: String; let type: String; let rollbackBackup: String }

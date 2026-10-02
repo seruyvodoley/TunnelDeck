@@ -75,7 +75,7 @@ import Testing
 }
 
 @Test func profileListingParser() {
-    let profiles = ProfileParser.parseListing("/root/wg0.conf|500|2026-01-01T12:00:00\n/root/antizapret/client/a.ovpn|1000|2026-01-02T12:00:00")
+    let profiles = ProfileParser.parseListing("/root/wg0.conf|500|2026-01-01T12:00:00\n/root/antizapret/client/a.ovpn|1000|2026-01-02T12:00:00\n/root/unrelated.txt|20|2026-01-03T12:00:00")
     #expect(profiles.count == 2)
     #expect(profiles[0].type == "WireGuard")
     #expect(profiles[1].type == "OpenVPN")

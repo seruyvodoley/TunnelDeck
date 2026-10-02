@@ -9,7 +9,7 @@ struct HelperPeerChange: Codable, Sendable { let name: String?; let ip: String?;
 struct HelperServiceChange: Codable, Sendable { let unit: String; let action: String; let state: String; let backup: String }
 
 actor HelperService {
-    static let localVersion = "1.1.0"
+    static let localVersion = "1.2.0"
     private let ssh: SSHService
     init(ssh: SSHService) { self.ssh = ssh }
 
@@ -62,6 +62,18 @@ actor HelperService {
         let object = try JSONSerialization.jsonObject(with: Data(result.stdout.utf8)) as? [String: String]
         guard let path = object?["backup"] else { throw NSError(domain: "TunnelDeck.Helper", code: 1, userInfo: [NSLocalizedDescriptionKey: "Invalid backup response"]) }
         return path
+    }
+
+    func restorePreview(identifier: String, type: String, configuration: SSHConfiguration) async throws -> RestorePreview {
+        let result = try await ssh.executeHelper(.restorePreview(identifier: identifier, type: type), configuration: configuration)
+        guard result.succeeded else { throw NSError(domain: "TunnelDeck.Helper", code: Int(result.exitCode), userInfo: [NSLocalizedDescriptionKey: result.stderr]) }
+        return try JSONDecoder().decode(RestorePreview.self, from: Data(result.stdout.utf8))
+    }
+
+    func restoreApply(identifier: String, type: String, configuration: SSHConfiguration) async throws -> RestoreResult {
+        let result = try await ssh.executeHelper(.restoreApply(identifier: identifier, type: type), configuration: configuration)
+        guard result.succeeded else { throw NSError(domain: "TunnelDeck.Helper", code: Int(result.exitCode), userInfo: [NSLocalizedDescriptionKey: result.stdout + result.stderr]) }
+        return try JSONDecoder().decode(RestoreResult.self, from: Data(result.stdout.utf8))
     }
 }
 

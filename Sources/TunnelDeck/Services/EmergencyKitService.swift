@@ -1,20 +1,15 @@
 import Foundation
 
 enum EmergencyKitService {
-    static func create(health: HealthReport?, server: ServerProfile?, profiles: [LocalProfile], backups: [BackupRecord]) throws -> URL {
+    static func create(health: HealthReport?, server: ServerProfile?, profiles: [LocalProfile], backups: [BackupRecord], includeClientCredentials: Bool) throws -> URL {
+        guard !includeClientCredentials else { throw NSError(domain: "TunnelDeck.EmergencyKit", code: 2, userInfo: [NSLocalizedDescriptionKey: "Encrypted secret containers are unavailable; client credentials were not included."]) }
         let manager = FileManager.default
         let support = manager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("TunnelDeck/EmergencyKits", isDirectory: true)
         try manager.createDirectory(at: support, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         let temporary = manager.temporaryDirectory.appendingPathComponent("TunnelDeck-Emergency-\(UUID().uuidString)", isDirectory: true)
         try manager.createDirectory(at: temporary, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         defer { try? manager.removeItem(at: temporary) }
-        let profileFolder = temporary.appendingPathComponent("ClientProfiles", isDirectory: true)
-        try manager.createDirectory(at: profileFolder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-        for profile in profiles {
-            let destination = profileFolder.appendingPathComponent(profile.url.lastPathComponent)
-            try manager.copyItem(at: profile.url, to: destination)
-            try manager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: destination.path)
-        }
+        _ = profiles
         let publicInfo: [String: String] = ["name": server?.name ?? "Current VPS", "host": server?.host ?? "", "role": server?.role ?? "", "latestBackupManifest": backups.first?.path ?? ""]
         try JSONSerialization.data(withJSONObject: publicInfo, options: .prettyPrinted).write(to: temporary.appendingPathComponent("server-public.json"), options: .atomic)
         if let health { try JSONEncoder().encode(health).write(to: temporary.appendingPathComponent("health-report.json"), options: .atomic) }

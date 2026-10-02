@@ -30,8 +30,12 @@ final class AppViewModel: ObservableObject {
     @Published var servers: [ServerProfile] = []
     @Published var activeServerID: UUID?
     @Published var configurationDrift: [String] = []
+    @Published var restorePreview: RestorePreview?
+    @Published var approvedListenerIDs = Set<String>()
+    @Published var adGuard = AdGuardSnapshot()
 
     let ssh = SSHService()
+    let adGuardAPI = AdGuardAPIService()
     lazy var helper = HelperService(ssh: ssh)
     private let history = DiagnosticHistoryStore()
     private let activityStore = ActivityStore()
@@ -50,6 +54,7 @@ final class AppViewModel: ObservableObject {
         Task { activity = await activityStore.load() }
         if let data = UserDefaults.standard.data(forKey: "servers") { servers = (try? JSONDecoder().decode([ServerProfile].self, from: data)) ?? [] }
         activeServerID = UserDefaults.standard.string(forKey: "activeServerID").flatMap(UUID.init)
+        loadServerScopedState()
     }
 
     var configuration: SSHConfiguration { SSHConfiguration(host: settings.host, username: settings.username, keyPath: NSString(string: settings.keyPath).expandingTildeInPath, timeout: 8, port: settings.port) }
@@ -71,7 +76,7 @@ final class AppViewModel: ObservableObject {
     func selectServer(_ id: UUID) {
         guard let server = servers.first(where: { $0.id == id }) else { return }
         activeServerID = id; UserDefaults.standard.set(id.uuidString, forKey: "activeServerID"); settings.host = server.host; settings.port = server.port; settings.username = server.username; settings.keyPath = server.keyPath
-        system = SystemSnapshot(); wireGuard = WireGuardSnapshot(); units = []; listeners = []; healthReport = nil
+        system = SystemSnapshot(); wireGuard = WireGuardSnapshot(); units = []; listeners = []; healthReport = nil; loadServerScopedState()
         saveSettings(); Task { await refresh() }
     }
 
@@ -208,11 +213,35 @@ final class AppViewModel: ObservableObject {
         let commands: [ReadCommand] = [.hostname, .wireGuardService, .wireGuard, .wireGuardAddress, .udpListeners, .ipForward, .natRules, .pingInternet, .dnsTest, .adGuardStatus, .adGuardBinds, .antiZapretStatus, .disk, .memory, .uptime, .listeners, .firewallState, .configurationHashes]
         var results: [ReadCommand: CommandResult] = [:]
         for command in commands { results[command] = await execute(command, subsystem: "Doctor") }
-        healthReport = HealthEvaluator.report(results: results, listeners: listeners, system: system, wireGuard: wireGuard, host: settings.host)
+        loadServerScopedState()
+        healthReport = HealthEvaluator.report(results: results, listeners: listeners, system: system, wireGuard: wireGuard, host: settings.host, approvedListenerIDs: approvedListenerIDs)
         detectConfigurationDrift(results[.configurationHashes]?.stdout ?? "", storeBaseline: healthReport?.state == .online)
         if healthReport?.state == .online { lastSuccessfulHealthCheck = Date() }
         await activityStore.append(operation: "Full Health Check", server: settings.host, preview: "\(commands.count) read-only checks", result: healthReport?.state.rawValue ?? "unknown")
         activity = await activityStore.load()
+    }
+
+    func approveListener(for issue: HealthIssue) {
+        guard issue.fix == "approve-listener", let listener = listeners.first(where: { issue.id == "unexpected-\($0.id)" }), ![53, 3000].contains(listener.port) else { return }
+        approvedListenerIDs.insert(listener.id)
+        UserDefaults.standard.set(Array(approvedListenerIDs), forKey: "approvedListeners-\(settings.host)")
+        Task { await runFullHealthCheck() }
+    }
+
+    private func loadServerScopedState() { approvedListenerIDs = Set(UserDefaults.standard.stringArray(forKey: "approvedListeners-\(settings.host)") ?? []) }
+
+    func saveAdGuardCredentials(baseURL: String, username: String, password: String) async {
+        do { try KeychainService.save(baseURL, account: "adguard-url-\(settings.host)"); try KeychainService.save(username, account: "adguard-user-\(settings.host)"); try KeychainService.save(password, account: "adguard-password-\(settings.host)"); await refreshAdGuardAPI() }
+        catch { presentedError = AppError(title: "AdGuard credentials could not be saved", message: "Keychain rejected the credentials.", technicalDetails: error.localizedDescription, recommendedAction: "Check Keychain access and retry.") }
+    }
+
+    func refreshAdGuardAPI() async {
+        let serverIP = wireGuard.address.split(separator: "/").first.map(String.init) ?? ""
+        let baseURL = KeychainService.load(account: "adguard-url-\(settings.host)") ?? "http://\(serverIP):3000"
+        let username = KeychainService.load(account: "adguard-user-\(settings.host)") ?? ""
+        let password = KeychainService.load(account: "adguard-password-\(settings.host)") ?? ""
+        guard !serverIP.isEmpty, !username.isEmpty, !password.isEmpty else { adGuard.error = "AdGuard API credentials are not configured"; return }
+        adGuard = await adGuardAPI.load(baseURL: baseURL, username: username, password: password)
     }
 
     private func detectConfigurationDrift(_ output: String, storeBaseline: Bool) {
@@ -229,7 +258,7 @@ final class AppViewModel: ObservableObject {
         guard settings.writeModeEnabled, helperVersion == HelperService.localVersion else { return false }
         do {
             let path = try await helper.createBackup(operation: operation, configuration: configuration)
-            UserDefaults.standard.set(Date(), forKey: "lastScheduledBackup")
+            UserDefaults.standard.set(Date(), forKey: "lastScheduledBackup-\(settings.host)")
             await activityStore.append(operation: "Configuration backup", server: settings.host, preview: operation, result: path)
             activity = await activityStore.load(); await refreshHelper(); return true
         } catch {
@@ -238,10 +267,10 @@ final class AppViewModel: ObservableObject {
         }
     }
 
-    func createEmergencyKit() {
+    func createEmergencyKit(includeClientCredentials: Bool = false) {
         do {
             let server = servers.first { $0.id == activeServerID } ?? ServerProfile(name: "Current VPS", host: settings.host, port: settings.port, username: settings.username, keyPath: "", role: "Primary")
-            let archive = try EmergencyKitService.create(health: healthReport, server: server, profiles: localProfiles, backups: backups)
+            let archive = try EmergencyKitService.create(health: healthReport, server: server, profiles: localProfiles, backups: backups, includeClientCredentials: includeClientCredentials)
             Task { await activityStore.append(operation: "Create Emergency Kit", server: settings.host, preview: "Sanitized recovery archive", result: archive.path); activity = await activityStore.load() }
             ProfileStore.revealURL(archive)
         } catch { presentedError = AppError(title: "Emergency Kit failed", message: "The local recovery archive could not be created.", technicalDetails: SecretRedactor.redact(error.localizedDescription), recommendedAction: "Check Application Support permissions and available disk space.") }
@@ -256,19 +285,37 @@ final class AppViewModel: ObservableObject {
         } catch { presentedError = AppError(title: "Backup download failed", message: "The server backup could not be copied to this Mac.", technicalDetails: SecretRedactor.redact(error.localizedDescription), recommendedAction: "Check SSH access and local Application Support permissions.") }
     }
 
+    func previewRestore(_ backup: BackupRecord, type: String) async {
+        do { restorePreview = try await helper.restorePreview(identifier: (backup.path as NSString).lastPathComponent, type: type, configuration: configuration) }
+        catch { presentedError = AppError(title: "Restore preview failed", message: "The backup could not be safely verified for restore.", technicalDetails: SecretRedactor.redact(error.localizedDescription), recommendedAction: "Do not restore this backup; inspect its manifest and hashes.") }
+    }
+
+    func applyRestore() async -> Bool {
+        guard settings.writeModeEnabled, helperVersion == HelperService.localVersion, let preview = restorePreview else { return false }
+        do {
+            let result = try await helper.restoreApply(identifier: preview.backup, type: preview.type, configuration: configuration)
+            await activityStore.append(operation: "Restore", server: settings.host, preview: "\(preview.type): \(preview.files.count) verified files", result: "success", rollback: "available: \(result.rollbackBackup)")
+            activity = await activityStore.load(); restorePreview = nil; await refresh(); return true
+        } catch {
+            await activityStore.append(operation: "Restore", server: settings.host, preview: preview.type, result: "failed", rollback: "helper rollback requested")
+            activity = await activityStore.load(); presentedError = AppError(title: "Restore failed", message: "The helper rejected or rolled back the restore.", technicalDetails: SecretRedactor.redact(error.localizedDescription), recommendedAction: "Review Activity and helper health; do not retry until the cause is understood."); return false
+        }
+    }
+
     private func performScheduledBackupIfNeeded() async {
         guard settings.writeModeEnabled, helperVersion == HelperService.localVersion else { return }
-        let last = UserDefaults.standard.object(forKey: "lastScheduledBackup") as? Date ?? .distantPast
+        let last = UserDefaults.standard.object(forKey: "lastScheduledBackup-\(settings.host)") as? Date ?? .distantPast
         if Date().timeIntervalSince(last) >= 86_400 { _ = await createBackup() }
     }
 
     private func evaluateMonitoringState() async {
         let current = ["vps": system.health.rawValue, "wg0": wireGuard.state.rawValue, "adguard": units.first { $0.name.contains("AdGuardHome") }?.activeState ?? "unknown", "antizapret": units.first { $0.name == "antizapret.service" }?.activeState ?? "unknown", "dnsPublic": String(listeners.contains { $0.isPublic && $0.port == 53 }), "diskCritical": String(system.diskPercent >= 90)]
-        let previous = UserDefaults.standard.dictionary(forKey: "monitoringState") as? [String: String] ?? [:]
+        let stateKey = "monitoringState-\(settings.host)"
+        let previous = UserDefaults.standard.dictionary(forKey: stateKey) as? [String: String] ?? [:]
         if settings.notificationsEnabled {
             for (key, value) in current where previous[key] != nil && previous[key] != value { NotificationService.send(title: "TunnelDeck state changed", body: "\(key): \(previous[key]!) → \(value)", id: "tunneldeck-\(key)-\(value)") }
         }
-        UserDefaults.standard.set(current, forKey: "monitoringState")
+        UserDefaults.standard.set(current, forKey: stateKey)
     }
 
     func testSSH() async -> Bool {

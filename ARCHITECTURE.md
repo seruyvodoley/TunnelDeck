@@ -18,6 +18,8 @@ Write Mode is separately gated in Settings and requires explicit confirmation. I
 
 `ServerHelper/tunneldeck-helper` is a versioned Python 3 program intended for `/usr/local/libexec/tunneldeck-helper`, owned by root with mode `0750`. It uses `argparse` fixed subcommands, validates every input, invokes programs with argument arrays, and never invokes a shell.
 
+Restore accepts only a backup identifier and typed operation. It resolves paths inside `/root/tunneldeck-backups`, rejects symlinks and traversal, verifies SHA-256, maps entries to an explicit allowlist, creates a rollback backup and applies files atomically. Raw target paths are never accepted from the UI.
+
 ## Transaction model
 
 `ServerTransaction` defines `prepare`, `backup`, `preview`, `apply`, `validate`, and `rollback`. The helper implements the critical WireGuard transaction directly: backup, candidate generation, `wg-quick strip` validation, atomic write, live `wg set`, health validation, and restoration plus `wg syncconf` on failure.

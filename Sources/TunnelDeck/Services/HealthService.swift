@@ -17,7 +17,7 @@ actor ActivityStore {
 }
 
 enum HealthEvaluator {
-    static func report(results: [ReadCommand: CommandResult], listeners: [Listener], system: SystemSnapshot, wireGuard: WireGuardSnapshot, host: String) -> HealthReport {
+    static func report(results: [ReadCommand: CommandResult], listeners: [Listener], system: SystemSnapshot, wireGuard: WireGuardSnapshot, host: String, approvedListenerIDs: Set<String> = []) -> HealthReport {
         var issues: [HealthIssue] = []
         func add(_ id: String, _ title: String, _ explanation: String, _ details: String, _ state: HealthState, _ fix: String? = nil) {
             issues.append(HealthIssue(id: id, title: title, explanation: explanation, technicalDetails: SecretRedactor.redact(details), state: state, fix: fix))
@@ -36,7 +36,7 @@ enum HealthEvaluator {
         let exposed = listeners.filter { $0.isPublic || (!host.isEmpty && $0.address == host) }
         for listener in exposed where [53, 3000].contains(listener.port) { add("public-\(listener.id)", "Sensitive service is publicly exposed", "DNS or a management UI is bound to a public/wildcard address.", "\(listener.protocolName) \(listener.address):\(listener.port) \(listener.process)", .offline) }
         let expectedPorts = Set([22, Int(wireGuard.listenPort) ?? 51820])
-        for listener in exposed where !expectedPorts.contains(listener.port) && ![53, 3000].contains(listener.port) { add("unexpected-\(listener.id)", "Unexpected public listener", "A port outside the configured firewall baseline is listening publicly.", "\(listener.protocolName) \(listener.address):\(listener.port) \(listener.process)", .warning) }
+        for listener in exposed where !expectedPorts.contains(listener.port) && ![53, 3000].contains(listener.port) && !approvedListenerIDs.contains(listener.id) { add("unexpected-\(listener.id)", "New public listener detected", "This listener is outside the confirmed baseline for this VPS.", "\(listener.protocolName) \(listener.address):\(listener.port) \(listener.process)", .warning, "approve-listener") }
         if system.diskPercent >= 90 { add("disk", "Disk usage is above 90%", "Backups and services may fail when storage is exhausted.", "\(system.diskPercent)%", .offline) }
         else if system.diskPercent >= 80 { add("disk", "Disk usage is elevated", "Plan cleanup before storage becomes critical.", "\(system.diskPercent)%", .warning) }
         if system.memoryPercent >= 90 { add("ram", "Memory usage is above 90%", "Services may be killed under memory pressure.", "\(system.memoryPercent)%", .warning) }

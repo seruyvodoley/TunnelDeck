@@ -77,10 +77,77 @@ struct AntiZapretView: View {
 
 struct DNSView: View {
     @EnvironmentObject var model: AppViewModel
+    @StateObject private var state = DNSViewState()
     var dns: [Listener] { model.listeners.filter { $0.port == 53 } }
     var web: [Listener] { model.listeners.filter { $0.port == 3000 } }
-    var body: some View { let serverIP = model.wireGuard.address.split(separator: "/").first.map(String.init) ?? ""; ScrollView { VStack(alignment: .leading, spacing: 18) { if dns.contains(where: { $0.isPublic || $0.address == model.settings.host }) { Label("DNS is exposed on a public/wildcard address", systemImage: "exclamationmark.triangle.fill").foregroundStyle(.red).padding().background(.red.opacity(0.1), in: RoundedRectangle(cornerRadius: 12)) }; listenerCard("AntiZapret DNS", dns.filter { $0.address.hasPrefix("127.") }); listenerCard("AdGuard Home DNS", dns.filter { $0.address == serverIP }); listenerCard("Other DNS listeners", dns.filter { !$0.address.hasPrefix("127.") && $0.address != serverIP }); listenerCard("AdGuard Web UI", web); HStack { Button("Open AdGuard") { if !serverIP.isEmpty { LocalNetworkService.open("http://\(serverIP):3000") } }; Button("Restart AdGuard") {}.disabled(true) } }.padding(20) } }
-    private func listenerCard(_ title: String, _ values: [Listener]) -> some View { MetricCard(title: title, icon: "server.rack") { VStack(alignment: .leading, spacing: 8) { if values.isEmpty { Text("Not detected").foregroundStyle(.secondary) }; ForEach(values) { item in HStack { StatusDot(state: item.isPublic ? .warning : .online); Text("\(item.protocolName) · \(item.address):\(item.port)"); Spacer(); Text(item.process).foregroundStyle(.secondary) } } } } }
+
+    var body: some View {
+        let serverIP = model.wireGuard.address.split(separator: "/").first.map(String.init) ?? ""
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                if dns.contains(where: { $0.isPublic || $0.address == model.settings.host }) {
+                    Label("DNS is exposed on a public/wildcard address", systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.red).padding().background(.red.opacity(0.1), in: RoundedRectangle(cornerRadius: 12))
+                }
+                listenerCard("AntiZapret DNS", dns.filter { $0.address.hasPrefix("127.") })
+                listenerCard("AdGuard Home DNS", dns.filter { $0.address == serverIP })
+                listenerCard("Other DNS listeners", dns.filter { !$0.address.hasPrefix("127.") && $0.address != serverIP })
+                listenerCard("AdGuard Web UI", web)
+                MetricCard(title: "AdGuard Home API", icon: "chart.bar") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        KeyValueRow(key: "Status", value: model.adGuard.available ? "Available · \(model.adGuard.version)" : (model.adGuard.error ?? "Not loaded"))
+                        KeyValueRow(key: "Queries", value: String(model.adGuard.totalQueries))
+                        KeyValueRow(key: "Blocked", value: String(model.adGuard.blockedQueries))
+                        KeyValueRow(key: "Average processing", value: String(format: "%.3f s", model.adGuard.averageProcessingTime))
+                        Text("Top queried: \(model.adGuard.topQueried.prefix(5).joined(separator: ", "))")
+                        Text("Top blocked: \(model.adGuard.topBlocked.prefix(5).joined(separator: ", "))")
+                        Text("Top clients: \(model.adGuard.topClients.prefix(5).joined(separator: ", "))")
+                        Text("Filters: \(model.adGuard.filters.joined(separator: ", "))")
+                        Text("Recent queries: \(model.adGuard.queryLog.prefix(10).joined(separator: ", "))")
+                        HStack {
+                            Button("Login") { state.baseURL = "http://\(serverIP):3000"; state.showLogin = true }
+                            Button("Refresh API") { Task { await model.refreshAdGuardAPI() } }
+                        }
+                    }
+                }
+                Button("Open AdGuard") { if !serverIP.isEmpty { LocalNetworkService.open("http://\(serverIP):3000") } }
+            }.padding(20)
+        }
+        .sheet(isPresented: $state.showLogin) {
+            VStack(alignment: .leading, spacing: 14) {
+                Text("AdGuard Home Login").font(.title2.bold())
+                TextField("Base URL", text: $state.baseURL)
+                TextField("Username", text: $state.username)
+                SecureField("Password", text: $state.password)
+                Text("Credentials are stored only in macOS Keychain. Authorization headers are never logged.").foregroundStyle(.secondary)
+                HStack {
+                    Spacer(); Button("Cancel") { state.showLogin = false }
+                    Button("Save and Connect") {
+                        let password = state.password; state.password = ""; state.showLogin = false
+                        Task { await model.saveAdGuardCredentials(baseURL: state.baseURL, username: state.username, password: password) }
+                    }.buttonStyle(.borderedProminent)
+                }
+            }.padding(24).frame(width: 520)
+        }
+    }
+
+    private func listenerCard(_ title: String, _ values: [Listener]) -> some View {
+        MetricCard(title: title, icon: "server.rack") {
+            VStack(alignment: .leading, spacing: 8) {
+                if values.isEmpty { Text("Not detected").foregroundStyle(.secondary) }
+                ForEach(values) { item in
+                    HStack { StatusDot(state: item.isPublic ? .warning : .online); Text("\(item.protocolName) · \(item.address):\(item.port)"); Spacer(); Text(item.process).foregroundStyle(.secondary) }
+                }
+            }
+        }
+    }
+}
+
+@MainActor private final class DNSViewState: ObservableObject {
+    @Published var showLogin = false
+    @Published var baseURL = ""
+    @Published var username = ""
+    @Published var password = ""
 }
 
 struct DiagnosticsView: View {

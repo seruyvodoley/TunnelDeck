@@ -22,4 +22,4 @@ Treat this as critical. Do not bypass host checking. Verify the new fingerprint 
 
 ## Restore required
 
-Review `manifest.json`, hashes and exact file list. Create a backup of current state first. Restore only the listed scoped files, validate configuration, apply, and run health checks. If validation fails, restore the pre-restore backup.
+Use Preview Restore to verify `manifest.json`, hashes, typed allowlist and the exact file list. Restore creates a current-state backup, applies atomically and runs the affected service health check. A failed health check triggers rollback. Never copy an entire backup tree over `/`.

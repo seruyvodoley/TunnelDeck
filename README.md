@@ -1,4 +1,4 @@
-# TunnelDeck
+# TunnelDeck 1.2
 
 Native macOS control panel for a self-hosted WireGuard, AntiZapret and AdGuard Home VPS. Built with Swift, SwiftUI and the system OpenSSH client—no Electron, embedded terminal, passwords or private keys in the app bundle.
 
@@ -107,7 +107,15 @@ Service start, stop and restart actions require write mode, an explicit per-oper
 
 When Write Mode is enabled and TunnelDeck is running, it checks once per refresh whether 24 hours have elapsed since the last scheduled backup. The helper captures the relevant WireGuard, TunnelDeck metadata, AntiZapret and AdGuard configuration plus firewall, routes and service health, then retains the newest 14 backup directories.
 
-Emergency Kit creates a mode-`0600` local ZIP containing client profiles, public server metadata, the latest backup manifest reference, health report and recovery notes. It excludes server private keys, SSH keys, passwords and AdGuard credentials.
+Emergency Kit creates a mode-`0600` public-only ZIP containing public server metadata, the latest backup manifest reference, health report and recovery notes. Client profiles are excluded because they contain private credentials. Server private keys, SSH keys, passwords and AdGuard credentials are never included.
+
+## Verified restore
+
+Helper 1.2 confines manifest paths to the selected backup, rejects symlinks and traversal, verifies SHA-256, and permits only typed allowlisted targets. Restore creates a current-state backup, writes atomically, syncs or restarts only the relevant service, validates health and rolls back on failure.
+
+## Approved listeners and AdGuard API
+
+SSH and the detected clean WireGuard port form the automatic public baseline. Other listeners require explicit per-VPS approval; ports 53 and 3000 can never be approved. AdGuard URL and credentials are stored per VPS in Keychain, and its official status, statistics, query-log and filtering APIs are read without logging authorization data.
 
 ## Security model
 
@@ -131,7 +139,9 @@ swift test
 
 ## Known limitations
 
-- Backup restore remains disabled until server-side preview and rollback validation are complete.
+- Client credentials cannot be included in Emergency Kit until a verified encrypted-container implementation is available.
+- Temporary AdGuard allow rules remain disabled pending transactionally verified expiry cleanup.
+- Channel throughput benchmarking and full TLS certificate metadata remain future transport work.
 - iperf execution is manual and is never started automatically.
 - Router configuration is intentionally not automated.
 - The current peer-management helper expects the clean interface to be named `wg0`.

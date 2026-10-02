@@ -94,7 +94,7 @@ enum ProfileParser {
     static func parseListing(_ text: String) -> [ProfileMetadata] {
         text.split(separator: "\n").compactMap { line in
             let fields = line.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
-            guard let path = fields.first else { return nil }
+            guard let path = fields.first, path.hasSuffix(".conf") || path.hasSuffix(".ovpn") else { return nil }
             let name = URL(fileURLWithPath: path).lastPathComponent
             let type = path.hasSuffix(".ovpn") ? "OpenVPN" : "WireGuard"
             let lower = path.lowercased()
