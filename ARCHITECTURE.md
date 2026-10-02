@@ -1,5 +1,15 @@
 # TunnelDeck Architecture
 
+## 2.0 direction
+
+`AppViewModel` remains the compatibility facade for 1.x screens. New behavior is extracted incrementally into fleet, incident, security/exposure, baseline and alert controllers/engines. This avoids a high-risk rewrite and keeps each commit release-buildable.
+
+The 2.0 domain is node-scoped: infrastructure nodes, services, endpoints, WireGuard metadata, monitoring, events, incidents, alerts, baselines, drift and backups carry a stable node UUID. Hosts are mutable connection attributes, not identity.
+
+SQLite is the operational source of truth. Migrations use `PRAGMA user_version`, foreign keys, WAL and transactions. Secrets are excluded; SSH key paths and AdGuard credentials remain in Keychain/existing secure storage. Legacy Monitoring JSON is imported with UUID deduplication and retained during compatibility.
+
+Remote discovery remains read-only. Existing writes still require explicit Write Mode and matching helper 1.2.1. Topology, exposure, drift, incidents and alerts never change VPS configuration.
+
 ## Swift application
 
 TunnelDeck is a native SwiftUI macOS application. `AppViewModel` owns cached UI state and coordinates actor-based services. Views never construct shell commands. Parsers transform command output into typed models before presentation.

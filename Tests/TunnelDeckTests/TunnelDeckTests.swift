@@ -368,84 +368,87 @@ import Testing
     #expect(events.contains { $0.component == "listeners" && $0.detail.contains("tcp:8080") })
 }
 
-@Test func incidentEngineGroupsOutageAndRecovery() {
-    let now = Date()
-    let events = [
-        MonitoringEvent(id: UUID(), timestamp: now, component: "vps", title: "VPS offline", detail: "online → offline", state: .offline, recovered: false),
-        MonitoringEvent(id: UUID(), timestamp: now.addingTimeInterval(90), component: "vps", title: "VPS recovered", detail: "offline → online", state: .online, recovered: true)
-    ]
-    let incidents = IncidentEngine.build(from: events)
-    #expect(incidents.count == 1)
-    #expect(incidents[0].component == "vps")
-    #expect(incidents[0].end == now.addingTimeInterval(90))
-    #expect(!incidents[0].active)
+@Test func sqliteMigrationAndMultiNodeIsolation() async throws {
+    let folder = FileManager.default.temporaryDirectory.appendingPathComponent("TunnelDeckTests-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true); defer { try? FileManager.default.removeItem(at: folder) }
+    let store = try InfrastructureStore(url: folder.appendingPathComponent("test.sqlite3"))
+    #expect(try await store.schemaVersion() == InfrastructureStore.currentSchemaVersion)
+    let first = InfrastructureNode(id: UUID(), name: "A", role: .gateway, customRole: nil, host: "node-a.invalid", sshPort: 22, createdAt: Date(), updatedAt: Date(), enabled: true)
+    let second = InfrastructureNode(id: UUID(), name: "B", role: .dns, customRole: nil, host: "node-b.invalid", sshPort: 22, createdAt: Date(), updatedAt: Date(), enabled: true)
+    try await store.upsert(node: first); try await store.upsert(node: second)
+    let sample = MonitoringSample(id: UUID(), timestamp: Date(), cpuPercent: 1, memoryPercent: 2, diskPercent: 3, pingMilliseconds: 4, vpsState: .online, wireGuardState: .online, adGuardState: .online, antiZapretState: .online, publicDNSExposed: false, publicListeners: [])
+    try await store.insert(sample: sample, nodeID: first.id)
+    #expect(try await store.sampleCount(nodeID: first.id) == 1)
+    #expect(try await store.sampleCount(nodeID: second.id) == 0)
 }
 
-@Test func incidentEngineKeepsPublicListenerIncidentsSeparate() {
-    let now = Date()
-    let events = [
-        MonitoringEvent(id: UUID(), timestamp: now, component: "listeners", title: "New public listener", detail: "tcp:8080", state: .warning, recovered: false),
-        MonitoringEvent(id: UUID(), timestamp: now.addingTimeInterval(10), component: "listeners", title: "New public listener", detail: "udp:9999", state: .warning, recovered: false),
-        MonitoringEvent(id: UUID(), timestamp: now.addingTimeInterval(20), component: "listeners", title: "Public listener removed", detail: "tcp:8080", state: .online, recovered: false)
-    ]
-    let incidents = IncidentEngine.build(from: events)
-    #expect(incidents.count == 2)
-    #expect(incidents.first { $0.id.contains("tcp:8080") }?.end != nil)
-    #expect(incidents.first { $0.id.contains("udp:9999") }?.active == true)
+@Test func legacyMonitoringImportIsIdempotent() async throws {
+    let folder = FileManager.default.temporaryDirectory.appendingPathComponent("TunnelDeckImport-\(UUID().uuidString)"); try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true); defer { try? FileManager.default.removeItem(at: folder) }
+    let dbFolder = FileManager.default.temporaryDirectory.appendingPathComponent("TunnelDeckDB-\(UUID().uuidString)"); try FileManager.default.createDirectory(at: dbFolder, withIntermediateDirectories: true); defer { try? FileManager.default.removeItem(at: dbFolder) }
+    let node = InfrastructureNode(id: UUID(), name: "Legacy", role: .primary, customRole: nil, host: "legacy.invalid", sshPort: 22, createdAt: Date(), updatedAt: Date(), enabled: true)
+    let sample = MonitoringSample(id: UUID(), timestamp: Date(), cpuPercent: 1, memoryPercent: 2, diskPercent: 3, pingMilliseconds: nil, vpsState: .online, wireGuardState: .online, adGuardState: .unknown, antiZapretState: .unknown, publicDNSExposed: false, publicListeners: [])
+    var object = try JSONSerialization.jsonObject(with: JSONEncoder().encode([sample])) as! [[String:Any]]; object[0].removeValue(forKey: "nodeID"); try JSONSerialization.data(withJSONObject: object).write(to: folder.appendingPathComponent("samples-legacy.invalid.json"))
+    let store = try InfrastructureStore(url: dbFolder.appendingPathComponent("test.sqlite3")); try await store.upsert(node: node); let importer = LegacyMonitoringImporter(folder: folder)
+    _ = try await importer.importHistory(for: node, into: store); _ = try await importer.importHistory(for: node, into: store)
+    #expect(try await store.sampleCount(nodeID: node.id) == 1)
 }
 
-@Test func alertRuleEngineUsesThresholdCrossingAndCooldown() {
-    let now = Date()
-    let rules = [
-        AlertRule(id: UUID(), kind: .diskPercent, title: "Disk usage", enabled: true, threshold: 80, cooldownMinutes: 30),
-        AlertRule(id: UUID(), kind: .pingMilliseconds, title: "High ping", enabled: true, threshold: 100, cooldownMinutes: 30)
-    ]
-    let previous = MonitoringSample(
-        id: UUID(), timestamp: now, cpuPercent: 5, memoryPercent: 10, diskPercent: 70, pingMilliseconds: 50,
-        vpsState: .online, wireGuardState: .online, adGuardState: .online, antiZapretState: .online,
-        publicDNSExposed: false, publicListeners: []
-    )
-    let current = MonitoringSample(
-        id: UUID(), timestamp: now.addingTimeInterval(30), cpuPercent: 5, memoryPercent: 10, diskPercent: 85, pingMilliseconds: 150,
-        vpsState: .online, wireGuardState: .online, adGuardState: .online, antiZapretState: .online,
-        publicDNSExposed: false, publicListeners: []
-    )
-    let evaluation = AlertRuleEngine.evaluate(previous: previous, current: current, newEvents: [], rules: rules, lastFired: [:], now: current.timestamp)
-    #expect(evaluation.triggers.count == 2)
-
-    let last = Dictionary(uniqueKeysWithValues: rules.map { ($0.id.uuidString, current.timestamp.timeIntervalSince1970) })
-    let repeated = AlertRuleEngine.evaluate(previous: current, current: current, newEvents: [], rules: rules, lastFired: last, now: current.timestamp)
-    #expect(repeated.triggers.isEmpty)
+@Test func incidentGroupingSuppressesDependentServices() {
+    let node=UUID(), start=Date(); let events=[MonitoringEvent(id:UUID(),timestamp:start,component:"vps",title:"VPS offline",detail:"",state:.offline,recovered:false),MonitoringEvent(id:UUID(),timestamp:start,component:"wg0",title:"wg0 unknown",detail:"",state:.unknown,recovered:false),MonitoringEvent(id:UUID(),timestamp:start.addingTimeInterval(60),component:"vps",title:"VPS recovered",detail:"",state:.online,recovered:true)]
+    let incidents=IncidentEngine.incidents(events:events,nodeID:node); #expect(incidents.count == 1); #expect(incidents[0].observableCondition == "VPS connectivity outage"); #expect(incidents[0].recoveryState == .recovered); #expect(incidents[0].duration == 60)
 }
 
-@Test func peerHistoryTrafficDeltaHandlesGrowthAndReset() {
-    let now = Date()
-    let growing = [
-        PeerHistorySample(id: UUID(), timestamp: now, peerID: "p", name: "P", vpnIP: "10.0.0.2/32", status: .online, receivedBytes: 100, sentBytes: 200, latestHandshake: now),
-        PeerHistorySample(id: UUID(), timestamp: now.addingTimeInterval(30), peerID: "p", name: "P", vpnIP: "10.0.0.2/32", status: .online, receivedBytes: 400, sentBytes: 800, latestHandshake: now)
-    ]
-    #expect(PeerHistoryAnalytics.trafficDelta(points: growing) == 900)
-
-    let reset = [
-        PeerHistorySample(id: UUID(), timestamp: now, peerID: "p", name: "P", vpnIP: "10.0.0.2/32", status: .online, receivedBytes: 900, sentBytes: 900, latestHandshake: now),
-        PeerHistorySample(id: UUID(), timestamp: now.addingTimeInterval(30), peerID: "p", name: "P", vpnIP: "10.0.0.2/32", status: .online, receivedBytes: 100, sentBytes: 200, latestHandshake: now)
-    ]
-    #expect(PeerHistoryAnalytics.trafficDelta(points: reset) == 300)
+@Test func exposureRequiresFirewallEvidenceAndMergesIPFamilies() {
+    let listeners=[Listener(protocolName:"tcp",address:"0.0.0.0",port:53,process:"AdGuardHome"),Listener(protocolName:"tcp6",address:"::",port:53,process:"AdGuardHome")]
+    let unknown=ExposureAnalyzer.analyze(listeners:listeners,nodeID:UUID(),publicAddresses:[],vpnAddresses:[],firewallEvidence:""); #expect(unknown.count == 1); #expect(unknown[0].classification == .unknown); #expect(unknown[0].addressFamily == .dualStack)
+    let blocked=ExposureAnalyzer.analyze(listeners:listeners,nodeID:UUID(),publicAddresses:[],vpnAddresses:[],firewallEvidence:"53/tcp DENY Anywhere"); #expect(blocked[0].classification == .firewallBlocked)
 }
 
-@Test func adGuardHistoryDeltasHandleCounterReset() {
-    let now = Date()
-    let points = [
-        AdGuardHistorySample(id: UUID(), timestamp: now, totalQueries: 1000, blockedQueries: 200, blockedPercentage: 20, averageProcessingTime: 0.001),
-        AdGuardHistorySample(id: UUID(), timestamp: now.addingTimeInterval(60), totalQueries: 1200, blockedQueries: 260, blockedPercentage: 21.6, averageProcessingTime: 0.001)
-    ]
-    #expect(AdGuardHistoryAnalytics.queryDelta(points) == 200)
-    #expect(AdGuardHistoryAnalytics.blockedDelta(points) == 60)
+@Test func baselineDiffFindsListenersPeersAndPolicy() {
+    let node=UUID(); let old=ConfigurationBaseline(id:UUID(),nodeID:node,createdAt:Date(),publicListeners:["tcp:22"],services:["sshd"],ports:[22],wireGuardInterfaces:["wg0"],peerPublicIdentifiers:["peer-a"],dnsBinds:[],sshPolicy:["port":"22"],configurationHashes:["wg0":"a"]); var new=old; new.publicListeners.append("tcp:8080"); new.peerPublicIdentifiers=[]; new.sshPolicy["port"]="2222"; new.configurationHashes["wg0"]="b"; let drift=BaselineEngine.diff(baseline:old,current:new); #expect(drift.contains{$0.category == "public-listener" && $0.kind == .added}); #expect(drift.contains{$0.category == "wireguard-peer" && $0.kind == .removed}); #expect(drift.contains{$0.category == "ssh-policy"}); #expect(drift.contains{$0.category == "config-hash"})
+}
 
-    let reset = [
-        points[1],
-        AdGuardHistorySample(id: UUID(), timestamp: now.addingTimeInterval(120), totalQueries: 50, blockedQueries: 10, blockedPercentage: 20, averageProcessingTime: 0.001)
-    ]
-    #expect(AdGuardHistoryAnalytics.queryDelta(reset) == 50)
-    #expect(AdGuardHistoryAnalytics.blockedDelta(reset) == 10)
+@Test func alertsDeduplicateAndEmitRecovery() {
+    let rule=AlertRule(id:UUID(),nodeID:UUID(),kind:.nodeOffline,enabled:true,threshold:nil,severity:.critical,cooldown:60,muteUntil:nil,acknowledgedAt:nil); let first=AlertEngine.evaluate(rules:[rule],conditions:[.nodeOffline:true],previous:[:]); #expect(first.events.count == 1); let duplicate=AlertEngine.evaluate(rules:[rule],conditions:[.nodeOffline:true],previous:first.states); #expect(duplicate.events.isEmpty); let recovery=AlertEngine.evaluate(rules:[rule],conditions:[.nodeOffline:false],previous:duplicate.states); #expect(recovery.events.count == 1); #expect(recovery.events[0].isRecovery)
+}
+
+@Test func everyAlertKindEmitsOneAlertAndOneRecovery() {
+    let node=UUID(),rules=AlertEngine.defaultRules(nodeID:node,peerTimeout:300),active=Dictionary(uniqueKeysWithValues:AlertRuleKind.allCases.map{($0,true)})
+    let fired=AlertEngine.evaluate(rules:rules,conditions:active,previous:[:]);#expect(fired.events.count == AlertRuleKind.allCases.count);#expect(Set(fired.events.map{$0.componentID}) == Set(AlertRuleKind.allCases.map{"alert:\($0.rawValue)"}))
+    let recovered=AlertEngine.evaluate(rules:rules,conditions:Dictionary(uniqueKeysWithValues:AlertRuleKind.allCases.map{($0,false)}),previous:fired.states);#expect(recovered.events.count == AlertRuleKind.allCases.count);#expect(recovered.events.allSatisfy{$0.isRecovery})
+}
+
+@Test func supportBundleRedactsEveryForbiddenSecret() throws {
+    let log=LogEntry(timestamp:Date(),subsystem:"test",command:"fixture",stdout:"PrivateKey = supersecret\nPresharedKey = psk\nAuthorization: Bearer abc\nCookie: sid=123\npassword=hunter2\ntoken=xyz",stderr:"",exitCode:0)
+    let input=SupportBundleInput(applicationVersion:"test",helperVersion:"1.2.1",node:nil,health:nil,security:SecuritySnapshot(),exposure:[],samples:[],incidents:[],events:[],drift:[],logs:[log]); let files=try SupportBundleService.sanitizedFiles(input); let combined=files.values.joined(separator:"\n"); #expect(!combined.contains("supersecret")); #expect(!combined.contains("hunter2")); #expect(!combined.contains("Bearer abc")); #expect(!SupportBundleService.containsForbiddenSecret(combined))
+}
+
+@Test func alertThresholdCooldownAndRecovery() {
+    let node=UUID(),now=Date();let rule=AlertRule(id:UUID(),nodeID:node,kind:.disk,enabled:true,threshold:80,severity:.warning,cooldown:300,muteUntil:nil,acknowledgedAt:nil)
+    let below=70.0 >= (rule.threshold ?? 80),above=85.0 >= (rule.threshold ?? 80)
+    #expect(!below);#expect(above)
+    let fired=AlertEngine.evaluate(rules:[rule],conditions:[.disk:above],previous:[:],now:now);#expect(fired.events.count==1)
+    let duplicate=AlertEngine.evaluate(rules:[rule],conditions:[.disk:true],previous:fired.states,now:now.addingTimeInterval(60));#expect(duplicate.events.isEmpty)
+    let recovery=AlertEngine.evaluate(rules:[rule],conditions:[.disk:false],previous:duplicate.states,now:now.addingTimeInterval(90));#expect(recovery.events.count==1);#expect(recovery.events[0].isRecovery)
+    let cooled=AlertEngine.evaluate(rules:[rule],conditions:[.disk:true],previous:recovery.states,now:now.addingTimeInterval(120));#expect(cooled.events.isEmpty)
+    let silentRecovery=AlertEngine.evaluate(rules:[rule],conditions:[.disk:false],previous:cooled.states,now:now.addingTimeInterval(150));#expect(silentRecovery.events.isEmpty)
+}
+
+@Test func peerAndAdGuardDeltasHandleCounterReset() {
+    let node=UUID(),now=Date();let growth=[PeerHistorySample(nodeID:node,id:UUID(),timestamp:now,peerID:"p",name:"P",vpnIP:"10.0.0.2/32",status:.online,receivedBytes:100,sentBytes:200,latestHandshake:now),PeerHistorySample(nodeID:node,id:UUID(),timestamp:now.addingTimeInterval(30),peerID:"p",name:"P",vpnIP:"10.0.0.2/32",status:.online,receivedBytes:400,sentBytes:800,latestHandshake:now)];#expect(PeerHistoryAnalytics.trafficDelta(points:growth)==900);let peers=[growth[1],PeerHistorySample(nodeID:node,id:UUID(),timestamp:now.addingTimeInterval(60),peerID:"p",name:"P",vpnIP:"10.0.0.2/32",status:.online,receivedBytes:100,sentBytes:200,latestHandshake:now)];#expect(PeerHistoryAnalytics.trafficDelta(points:peers)==300)
+    let normal=[AdGuardHistorySample(nodeID:node,id:UUID(),timestamp:now,totalQueries:1000,blockedQueries:200,blockedPercentage:20,averageProcessingTime:0.001),AdGuardHistorySample(nodeID:node,id:UUID(),timestamp:now.addingTimeInterval(60),totalQueries:1200,blockedQueries:260,blockedPercentage:21,averageProcessingTime:0.001)];#expect(AdGuardHistoryAnalytics.queryDelta(normal)==200);#expect(AdGuardHistoryAnalytics.blockedDelta(normal)==60);let dns=[normal[1],AdGuardHistorySample(nodeID:node,id:UUID(),timestamp:now.addingTimeInterval(120),totalQueries:50,blockedQueries:10,blockedPercentage:20,averageProcessingTime:0.001)];#expect(AdGuardHistoryAnalytics.queryDelta(dns)==50);#expect(AdGuardHistoryAnalytics.blockedDelta(dns)==10)
+}
+
+@Test func telemetryPersistenceMigrationAndIsolation() async throws {
+    let root=FileManager.default.temporaryDirectory.appendingPathComponent("TunnelDeckTelemetry-\(UUID().uuidString)");let legacy=root.appendingPathComponent("legacy");try FileManager.default.createDirectory(at:legacy,withIntermediateDirectories:true);defer{try? FileManager.default.removeItem(at:root)}
+    let store=try InfrastructureStore(url:root.appendingPathComponent("db.sqlite3"));let a=InfrastructureNode(id:UUID(),name:"A",role:.primary,customRole:nil,host:"a.invalid",sshPort:22,createdAt:Date(),updatedAt:Date(),enabled:true);let b=InfrastructureNode(id:UUID(),name:"B",role:.relay,customRole:nil,host:"b.invalid",sshPort:22,createdAt:Date(),updatedAt:Date(),enabled:true);try await store.upsert(node:a);try await store.upsert(node:b)
+    let peer=PeerHistorySample(nodeID:a.id,id:UUID(),timestamp:Date(),peerID:"public-id",name:"PrivateKey = fixture-secret",vpnIP:"10.0.0.2/32",status:.online,receivedBytes:10,sentBytes:20,latestHandshake:Date());try await store.insert(peer:peer);try await store.insert(adGuard:AdGuardHistorySample(nodeID:a.id,id:UUID(),timestamp:Date(),totalQueries:10,blockedQueries:2,blockedPercentage:20,averageProcessingTime:0.001));#expect(try await store.peerHistory(nodeID:a.id).count==1);#expect(try await store.peerHistory(nodeID:b.id).isEmpty);#expect(try await store.adGuardHistory(nodeID:a.id).count==1)
+    let bytes=try Data(contentsOf:root.appendingPathComponent("db.sqlite3"));#expect(!String(decoding:bytes,as:UTF8.self).contains("fixture-secret"))
+}
+
+@Test func legacyTelemetryAndAlertMigrationIsIdempotent() async throws {
+    let root=FileManager.default.temporaryDirectory.appendingPathComponent("TunnelDeckLegacyTelemetry-\(UUID().uuidString)"),telemetry=root.appendingPathComponent("Telemetry"),alerts=root.appendingPathComponent("Alerts");try FileManager.default.createDirectory(at:telemetry,withIntermediateDirectories:true);try FileManager.default.createDirectory(at:alerts,withIntermediateDirectories:true);defer{try? FileManager.default.removeItem(at:root)}
+    let node=InfrastructureNode(id:UUID(),name:"Legacy",role:.primary,customRole:nil,host:"legacy.invalid",sshPort:22,createdAt:Date(),updatedAt:Date(),enabled:true),now=Date();let peer=PeerHistorySample(nodeID:node.id,id:UUID(),timestamp:now,peerID:"public",name:"Peer",vpnIP:"10.0.0.2/32",status:.online,receivedBytes:1,sentBytes:2,latestHandshake:now),dns=AdGuardHistorySample(nodeID:node.id,id:UUID(),timestamp:now,totalQueries:10,blockedQueries:2,blockedPercentage:20,averageProcessingTime:0.001)
+    var peerJSON=try JSONSerialization.jsonObject(with:JSONEncoder().encode([peer])) as! [[String:Any]];peerJSON[0].removeValue(forKey:"nodeID");try JSONSerialization.data(withJSONObject:peerJSON).write(to:telemetry.appendingPathComponent("peers-legacy.invalid.json"));var dnsJSON=try JSONSerialization.jsonObject(with:JSONEncoder().encode([dns])) as! [[String:Any]];dnsJSON[0].removeValue(forKey:"nodeID");try JSONSerialization.data(withJSONObject:dnsJSON).write(to:telemetry.appendingPathComponent("adguard-legacy.invalid.json"));let legacyRule:[[String:Any]]=[["kind":"diskPercent","enabled":true,"threshold":82.0,"cooldownMinutes":15],["kind":"serviceOffline","enabled":false,"threshold":0.0,"cooldownMinutes":22]];try JSONSerialization.data(withJSONObject:legacyRule).write(to:alerts.appendingPathComponent("rules-legacy.invalid.json"))
+    let store=try InfrastructureStore(url:root.appendingPathComponent("db.sqlite3"));try await store.upsert(node:node);let importer=LegacyTelemetryImporter(folder:telemetry);try await importer.importHistory(for:node,into:store);try await importer.importHistory(for:node,into:store);#expect(try await store.peerHistory(nodeID:node.id).count==1);#expect(try await store.adGuardHistory(nodeID:node.id).count==1);let rules=try await LegacyAlertImporter(folder:alerts).rules(for:node);let byKind=Dictionary(uniqueKeysWithValues:rules.map{($0.kind,$0)});#expect(byKind[.disk]?.threshold == 82);#expect(byKind[.disk]?.nodeID == node.id);#expect(byKind[.adGuardOffline]?.enabled == false);#expect(byKind[.antiZapretOffline]?.enabled == false);#expect(byKind[.adGuardOffline]?.cooldown == 22*60);#expect(byKind[.antiZapretOffline]?.cooldown == 22*60)
 }

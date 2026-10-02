@@ -12,7 +12,13 @@ struct ContentView: View {
 
     @ViewBuilder private var selectedView: some View {
         switch model.selectedSection {
+        case .fleet: FleetOverviewView()
+        case .topology: TopologyView()
         case .dashboard: DashboardView()
+        case .incidents: IncidentView()
+        case .exposure: ExposureView()
+        case .baseline: BaselineView()
+        case .alerts: AlertRulesView()
         case .doctor: DoctorView()
         case .monitoring: MonitoringView()
         case .wireGuard: WireGuardView()

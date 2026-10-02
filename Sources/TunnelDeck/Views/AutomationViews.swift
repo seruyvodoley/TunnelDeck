@@ -119,73 +119,6 @@ struct MonitoringView: View {
                     }
                 }
 
-                MetricCard(title: "Incident Center", icon: "exclamationmark.bubble") {
-                    VStack(alignment: .leading, spacing: 12) {
-                        HStack(spacing: 24) {
-                            incidentMetric("Active", String(activeIncidents.count))
-                            incidentMetric("24h", String(incidents24h.count))
-                            incidentMetric("Downtime · 24h", durationString(vpsDowntime24h))
-                            incidentMetric("MTTR", meanRecoveryTime.map(durationString) ?? "—")
-                        }
-                        if model.monitoringIncidents.isEmpty {
-                            Text("No incidents recorded yet.").foregroundStyle(.secondary)
-                        } else {
-                            ForEach(Array(model.monitoringIncidents.suffix(12).reversed())) { incident in
-                                HStack(alignment: .top, spacing: 10) {
-                                    StatusDot(state: incident.active ? incident.severity : .online)
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        HStack {
-                                            Text(incident.title).fontWeight(.semibold)
-                                            if incident.active { Text("ACTIVE").font(.caption.bold()).foregroundStyle(.orange) }
-                                            else { Text("RECOVERED").font(.caption.bold()).foregroundStyle(.green) }
-                                        }
-                                        Text("\(incident.start.formatted(date: .abbreviated, time: .standard)) · \(durationString(incident.duration()))")
-                                            .font(.caption).foregroundStyle(.secondary)
-                                    }
-                                    Spacer()
-                                }
-                            }
-                        }
-                    }
-                }
-
-                MetricCard(title: "Alert rules", icon: "bell.badge") {
-                    VStack(alignment: .leading, spacing: 10) {
-                        ForEach(model.alertRules) { rule in
-                            VStack(alignment: .leading, spacing: 6) {
-                                HStack {
-                                    Toggle(rule.title, isOn: Binding(
-                                        get: { rule.enabled },
-                                        set: { model.setAlertRuleEnabled(rule.id, enabled: $0) }
-                                    ))
-                                    Spacer()
-                                    Text("\(rule.cooldownMinutes)m cooldown").font(.caption).foregroundStyle(.secondary)
-                                }
-                                if let threshold = rule.threshold {
-                                    HStack {
-                                        Text(rule.kind == .pingMilliseconds ? "Threshold" : "Threshold")
-                                            .font(.caption).foregroundStyle(.secondary)
-                                        Slider(
-                                            value: Binding(
-                                                get: { threshold },
-                                                set: { model.setAlertRuleThreshold(rule.id, threshold: $0) }
-                                            ),
-                                            in: rule.kind == .pingMilliseconds ? 20...500 : 50...99,
-                                            step: rule.kind == .pingMilliseconds ? 10 : 1
-                                        )
-                                        Text(rule.kind == .pingMilliseconds ? "\(Int(threshold)) ms" : "\(Int(threshold))%")
-                                            .font(.caption).monospacedDigit()
-                                            .frame(width: 70, alignment: .trailing)
-                                    }
-                                }
-                                Divider()
-                            }
-                        }
-                        Text("Notifications fire on state transitions and threshold crossings. Recovery notifications are sent separately and are not blocked by cooldown.")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                }
-
                 MetricCard(title: "WireGuard peer history", icon: "point.3.connected.trianglepath.dotted") {
                     VStack(alignment: .leading, spacing: 10) {
                         if peerIDsInWindow.isEmpty {
@@ -282,27 +215,6 @@ struct MonitoringView: View {
     }
 
     private var latestSample: MonitoringSample? { model.monitoringSamples.last }
-    private var activeIncidents: [MonitoringIncident] { model.monitoringIncidents.filter(\.active) }
-    private var incidents24h: [MonitoringIncident] {
-        let cutoff = Date().addingTimeInterval(-86_400)
-        return model.monitoringIncidents.filter { ($0.end ?? Date()) >= cutoff }
-    }
-    private var vpsDowntime24h: TimeInterval {
-        let cutoff = Date().addingTimeInterval(-86_400)
-        return model.monitoringIncidents
-            .filter { $0.component == "vps" && ($0.end ?? Date()) >= cutoff }
-            .reduce(0) { total, incident in
-                let start = max(incident.start, cutoff)
-                let end = incident.end ?? Date()
-                return total + max(0, end.timeIntervalSince(start))
-            }
-    }
-    private var meanRecoveryTime: TimeInterval? {
-        let closed = model.monitoringIncidents.filter { $0.end != nil }
-        guard !closed.isEmpty else { return nil }
-        return closed.map { $0.duration() }.reduce(0, +) / Double(closed.count)
-    }
-
     private func serviceCard(_ title: String, component: String, state: HealthState) -> some View {
         MetricCard(title: title, icon: "circle.grid.2x2") {
             VStack(alignment: .leading, spacing: 7) {
@@ -337,12 +249,7 @@ struct MonitoringView: View {
         return "\(minutes)m"
     }
 
-    private func incidentMetric(_ title: String, _ value: String) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(title).font(.caption).foregroundStyle(.secondary)
-            Text(value).font(.title3.bold()).monospacedDigit()
-        }
-    }
+    private func incidentMetric(_ title: String, _ value: String) -> some View { VStack(alignment: .leading, spacing: 2) { Text(title).font(.caption).foregroundStyle(.secondary); Text(value).font(.title3.bold()).monospacedDigit() } }
 
     private func averageMetric(_ title: String, _ values: [Double], suffix: String = "%") -> some View {
         VStack(alignment: .leading, spacing: 2) {
@@ -367,6 +274,7 @@ struct RecoveryView: View {
         Text("Latest backups").font(.headline)
         ForEach(model.backups.prefix(5)) { backup in HStack { Text(backup.timestamp); Text(backup.operation).foregroundStyle(.secondary); Spacer(); Text(backup.path).font(.caption).textSelection(.enabled) } }
         Button("Open Verified Restore") { model.selectedSection = .backups }
+        Button("Export Diagnostic Bundle") { model.exportSupportBundle() }
         Text("Verified restore is available from Backups: choose a backup, select the restore type, review the SHA-256/diff preview, then restore with rollback protection.").font(.caption).foregroundStyle(.secondary)
     }.padding(20) } }
 }

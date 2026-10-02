@@ -1,5 +1,11 @@
 # Recovery
 
+## TunnelDeck 2.0 local data
+
+The SQLite database is local metadata, not a server configuration backup. If unavailable, TunnelDeck recreates the schema and can idempotently re-import retained 1.x Monitoring JSON.
+
+Use **Recovery → Export Diagnostic Bundle** for support. It intentionally excludes SSH private keys, WireGuard `PrivateKey`/`PresharedKey`, passwords, tokens, cookies, Authorization headers, AdGuard credentials and raw client configs.
+
 ## VPS unreachable
 
 Keep Write Mode disabled. Verify local routing, known-host status, TCP 22 reachability and the VPS provider console. TunnelDeck never changes network settings automatically.

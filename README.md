@@ -1,4 +1,28 @@
-# TunnelDeck 1.2.9
+# TunnelDeck 2.0.0
+
+> The `feature/tunneldeck-2.0` branch is an architecture preview. It preserves the 1.x dashboard and helper 1.2.1 compatibility while adding a local, read-only-first fleet operations layer.
+
+## TunnelDeck 2.0.0 release notes
+
+- Stable node-ID based multi-node domain and Fleet Overview.
+- Versioned SQLite persistence with idempotent imports for 1.x monitoring, events, alert settings, WireGuard peer history and AdGuard history.
+- Evidence-based read-only topology and Exposure Matrix.
+- Incident Center with recovery timelines, 24-hour metrics and dependent-service suppression during VPS outages.
+- Per-node local Alert Rules with thresholds, cooldown, acknowledgement, deduplication and recovery events.
+- Seven-day WireGuard peer status/handshake/RX/TX history with reset-safe traffic deltas.
+- Minute-rate AdGuard statistics history with reset-safe query and blocked-query deltas.
+- Non-secret configuration baselines and structural drift reporting.
+- Sanitized diagnostic support bundles with automated redaction checks.
+
+## TunnelDeck 2.0 architecture preview
+
+- Fleet Overview uses stable node UUIDs; unobserved nodes are `Unknown`.
+- Versioned SQLite stores local operational history. Existing Monitoring JSON is imported idempotently and retained for rollback compatibility.
+- Incidents group node connectivity outages and suppress dependent service false positives.
+- Topology and Exposure are evidence-based; wildcard bind alone does not prove public reachability.
+- Non-secret baselines report drift without applying changes.
+- Local alert rules are transition-only, cooldown-aware, mutable and acknowledgeable.
+- Diagnostic bundles are allowlisted, redacted and verified before ZIP creation.
 
 Native macOS control panel for a self-hosted WireGuard, AntiZapret and AdGuard Home VPS. Built with Swift, SwiftUI and the system OpenSSH client—no Electron, embedded terminal, passwords or private keys in the app bundle.
 

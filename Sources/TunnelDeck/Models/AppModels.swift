@@ -35,6 +35,8 @@ struct SystemSnapshot: Sendable {
 }
 
 struct WireGuardPeer: Identifiable, Sendable, Hashable {
+    var nodeID: UUID = LegacyNodeIdentity.unassigned
+    var interfaceID: UUID? = nil
     let id: String
     var name: String
     var vpnIP: String
@@ -113,7 +115,7 @@ struct Listener: Identifiable, Sendable, Hashable {
     var isPublic: Bool { address == "0.0.0.0" || address == "::" || address == "[::]" || address == "*" }
 }
 
-struct SecurityListener: Identifiable, Sendable, Hashable {
+struct SecurityListener: Identifiable, Codable, Sendable, Hashable {
     var id: String { "\(protocolName)-\(port)-\(service)" }
     let service: String
     let protocolName: String
@@ -176,6 +178,7 @@ struct LogEntry: Identifiable, Sendable {
 }
 
 struct MonitoringSample: Identifiable, Codable, Sendable {
+    var nodeID: UUID = LegacyNodeIdentity.unassigned
     let id: UUID
     let timestamp: Date
     let cpuPercent: Double
@@ -188,6 +191,10 @@ struct MonitoringSample: Identifiable, Codable, Sendable {
     let antiZapretState: HealthState
     let publicDNSExposed: Bool
     let publicListeners: [String]
+
+    private enum CodingKeys: String, CodingKey { case nodeID,id,timestamp,cpuPercent,memoryPercent,diskPercent,pingMilliseconds,vpsState,wireGuardState,adGuardState,antiZapretState,publicDNSExposed,publicListeners }
+    init(nodeID: UUID = LegacyNodeIdentity.unassigned, id: UUID, timestamp: Date, cpuPercent: Double, memoryPercent: Double, diskPercent: Double, pingMilliseconds: Double?, vpsState: HealthState, wireGuardState: HealthState, adGuardState: HealthState, antiZapretState: HealthState, publicDNSExposed: Bool, publicListeners: [String]) { self.nodeID=nodeID;self.id=id;self.timestamp=timestamp;self.cpuPercent=cpuPercent;self.memoryPercent=memoryPercent;self.diskPercent=diskPercent;self.pingMilliseconds=pingMilliseconds;self.vpsState=vpsState;self.wireGuardState=wireGuardState;self.adGuardState=adGuardState;self.antiZapretState=antiZapretState;self.publicDNSExposed=publicDNSExposed;self.publicListeners=publicListeners }
+    init(from decoder: Decoder) throws { let c=try decoder.container(keyedBy:CodingKeys.self); nodeID=try c.decodeIfPresent(UUID.self,forKey:.nodeID) ?? LegacyNodeIdentity.unassigned; id=try c.decode(UUID.self,forKey:.id);timestamp=try c.decode(Date.self,forKey:.timestamp);cpuPercent=try c.decode(Double.self,forKey:.cpuPercent);memoryPercent=try c.decode(Double.self,forKey:.memoryPercent);diskPercent=try c.decode(Double.self,forKey:.diskPercent);pingMilliseconds=try c.decodeIfPresent(Double.self,forKey:.pingMilliseconds);vpsState=try c.decode(HealthState.self,forKey:.vpsState);wireGuardState=try c.decode(HealthState.self,forKey:.wireGuardState);adGuardState=try c.decode(HealthState.self,forKey:.adGuardState);antiZapretState=try c.decode(HealthState.self,forKey:.antiZapretState);publicDNSExposed=try c.decode(Bool.self,forKey:.publicDNSExposed);publicListeners=try c.decode([String].self,forKey:.publicListeners) }
 }
 
 struct MonitoringEvent: Identifiable, Codable, Sendable {
@@ -207,6 +214,7 @@ struct MonitoringRecordResult: Sendable {
 }
 
 struct PeerHistorySample: Identifiable, Codable, Sendable {
+    var nodeID: UUID = LegacyNodeIdentity.unassigned
     let id: UUID
     let timestamp: Date
     let peerID: String
@@ -219,52 +227,13 @@ struct PeerHistorySample: Identifiable, Codable, Sendable {
 }
 
 struct AdGuardHistorySample: Identifiable, Codable, Sendable {
+    var nodeID: UUID = LegacyNodeIdentity.unassigned
     let id: UUID
     let timestamp: Date
     let totalQueries: Int
     let blockedQueries: Int
     let blockedPercentage: Double
     let averageProcessingTime: Double
-}
-
-struct MonitoringIncident: Identifiable, Sendable {
-    let id: String
-    let component: String
-    let title: String
-    let start: Date
-    var end: Date?
-    let severity: HealthState
-    var affectedComponents: [String]
-    var timeline: [MonitoringEvent]
-
-    var active: Bool { end == nil }
-    func duration(reference: Date = Date()) -> TimeInterval { max(0, (end ?? reference).timeIntervalSince(start)) }
-}
-
-enum AlertRuleKind: String, Codable, CaseIterable, Hashable, Sendable {
-    case vpsOffline
-    case wireGuardOffline
-    case serviceOffline
-    case publicDNS
-    case newPublicListener
-    case diskPercent
-    case pingMilliseconds
-}
-
-struct AlertRule: Identifiable, Codable, Sendable {
-    let id: UUID
-    let kind: AlertRuleKind
-    let title: String
-    var enabled: Bool
-    var threshold: Double?
-    var cooldownMinutes: Int
-}
-
-struct AlertTrigger: Sendable {
-    let ruleID: UUID
-    let title: String
-    let detail: String
-    let recovered: Bool
 }
 
 struct DiagnosticResult: Identifiable, Codable, Sendable {

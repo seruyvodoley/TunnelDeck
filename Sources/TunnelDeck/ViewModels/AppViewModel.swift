@@ -14,7 +14,7 @@ final class AppViewModel: ObservableObject {
     @Published var diagnostics: [DiagnosticResult] = []
     @Published var isRefreshing = false
     @Published var lastRefresh: Date?
-    @Published var selectedSection: SidebarSection = .dashboard
+    @Published var selectedSection: SidebarSection = .fleet
     @Published var showOnboarding: Bool
     @Published var statusMessage = "Read-only mode"
     @Published var helperVersion: String?
@@ -41,8 +41,14 @@ final class AppViewModel: ObservableObject {
     @Published var monitoringSamples: [MonitoringSample] = []
     @Published var monitoringEvents: [MonitoringEvent] = []
     @Published var monitoringWindowHours = 6
-    @Published var monitoringIncidents: [MonitoringIncident] = []
+    @Published var fleetSummaries: [FleetNodeSummary] = []
+    @Published var incidents: [Incident] = []
+    @Published var exposureEndpoints: [NetworkEndpoint] = []
+    @Published var configurationBaseline: ConfigurationBaseline?
+    @Published var baselineDrift: [ConfigurationDrift] = []
     @Published var alertRules: [AlertRule] = []
+    @Published var alertStates: [UUID: AlertRuntimeState] = [:]
+    @Published var alertEvents: [InfrastructureEvent] = []
     @Published var peerHistory: [PeerHistorySample] = []
     @Published var adGuardHistory: [AdGuardHistorySample] = []
 
@@ -53,11 +59,13 @@ final class AppViewModel: ObservableObject {
     private let history = DiagnosticHistoryStore()
     private let activityStore = ActivityStore()
     private let monitoringStore = MonitoringHistoryStore()
-    private let alertRuleStore = AlertRuleStore()
-    private let telemetryHistoryStore = TelemetryHistoryStore()
+    private let fleetController = FleetController()
+    private let persistenceStore = try? InfrastructureStore()
+    private var currentConfigurationHashes: [String: String] = [:]
+    private var lastPeerHistorySample: Date?
+    private var lastAdGuardHistorySample: Date?
     private var pollTask: Task<Void, Never>?
     private var previousCPUTicks: (idle: Double, total: Double)?
-    private var lastBackgroundAdGuardRefresh: Date?
 
     init() {
         let decoded = UserDefaults.standard.data(forKey: "settings").flatMap { try? JSONDecoder().decode(AppSettings.self, from: $0) }
@@ -67,12 +75,14 @@ final class AppViewModel: ObservableObject {
         showOnboarding = !initialSettings.completedOnboarding
         system.macLANIP = LocalNetworkService.lanIPv4()
         localProfiles = ProfileStore.list()
-        Task { diagnostics = await history.load() }
-        Task { activity = await activityStore.load() }
-        Task { await loadMonitoringHistory() }
-        if let data = UserDefaults.standard.data(forKey: "servers") { servers = (try? JSONDecoder().decode([ServerProfile].self, from: data)) ?? [] }
+        if let data = UserDefaults.standard.data(forKey: "servers") { servers = ((try? JSONDecoder().decode([ServerProfile].self, from: data)) ?? []).map { var value=$0;value.keyPath=KeychainService.load(account:"ssh-key-path-\(value.id.uuidString)") ?? "";return value } }
         activeServerID = UserDefaults.standard.string(forKey: "activeServerID").flatMap(UUID.init)
         loadServerScopedState()
+        updateFleet()
+        configureDefaultAlerts()
+        Task { diagnostics = await history.load() }
+        Task { activity = await activityStore.load() }
+        Task { await loadMonitoringHistory(); await loadBaseline() }
     }
 
     var configuration: SSHConfiguration { SSHConfiguration(host: settings.host, username: settings.username, keyPath: NSString(string: settings.keyPath).expandingTildeInPath, timeout: 8, port: settings.port) }
@@ -87,15 +97,17 @@ final class AppViewModel: ObservableObject {
     func saveCurrentServer(name: String = "Primary VPS", role: String = "Primary") {
         let profile = ServerProfile(id: activeServerID ?? UUID(), name: name, host: settings.host, port: settings.port, username: settings.username, keyPath: settings.keyPath, role: role)
         servers.removeAll { $0.id == profile.id }; servers.append(profile); activeServerID = profile.id
-        if let data = try? JSONEncoder().encode(servers) { UserDefaults.standard.set(data, forKey: "servers") }
+        try? KeychainService.save(profile.keyPath,account:"ssh-key-path-\(profile.id.uuidString)");let safeServers=servers.map{var value=$0;value.keyPath="";return value};if let data = try? JSONEncoder().encode(safeServers) { UserDefaults.standard.set(data, forKey: "servers") }
         UserDefaults.standard.set(profile.id.uuidString, forKey: "activeServerID"); saveSettings()
+        updateFleet()
     }
 
     func selectServer(_ id: UUID) {
         guard let server = servers.first(where: { $0.id == id }) else { return }
         activeServerID = id; UserDefaults.standard.set(id.uuidString, forKey: "activeServerID"); settings.host = server.host; settings.port = server.port; settings.username = server.username; settings.keyPath = server.keyPath
-        system = SystemSnapshot(); wireGuard = WireGuardSnapshot(); units = []; listeners = []; healthReport = nil; security = SecuritySnapshot(); monitoringSamples = []; monitoringEvents = []; monitoringIncidents = []; alertRules = []; peerHistory = []; adGuardHistory = []; lastBackgroundAdGuardRefresh = nil; loadServerScopedState()
-        saveSettings(); Task { await loadMonitoringHistory(); await refresh() }
+        system = SystemSnapshot(); wireGuard = WireGuardSnapshot(); units = []; listeners = []; healthReport = nil; security = SecuritySnapshot(); exposureEndpoints=[];monitoringSamples = []; monitoringEvents = []; peerHistory=[];adGuardHistory=[];incidents=[];alertRules=[];alertStates=[:];alertEvents=[];configurationBaseline=nil;baselineDrift=[];loadServerScopedState()
+        saveSettings(); Task { await loadMonitoringHistory();await loadBaseline();await refresh() }
+        updateFleet()
     }
 
     func completeOnboarding() { settings.completedOnboarding = true; showOnboarding = false; saveSettings() }
@@ -157,11 +169,8 @@ final class AppViewModel: ObservableObject {
             let pair = line.split(separator: "=", maxSplits: 1).map(String.init); return pair.count == 2 ? (pair[0], pair[1]) : nil
         })
         profiles = ProfileParser.parseListing(values.14.stdout)
-        lastRefresh = Date(); statusMessage = values.0.succeeded ? "Updated" : "SSH unavailable"
-        if values.0.succeeded {
-            await refreshHelper()
-            await refreshAdGuardHistoryIfNeeded()
-        }
+        lastRefresh = Date(); statusMessage = values.0.succeeded ? "Updated" : "SSH unavailable"; updateFleet()
+        if values.0.succeeded { await refreshHelper(); await sampleAdGuardHistoryIfNeeded() }
         await recordMonitoringState()
         await performScheduledBackupIfNeeded()
     }
@@ -346,25 +355,6 @@ final class AppViewModel: ObservableObject {
             return
         }
         adGuard = await adGuardAPI.load(baseURL: baseURL, username: username, password: password)
-        if adGuard.available {
-            adGuardHistory = await telemetryHistoryStore.recordAdGuard(host: settings.host, snapshot: adGuard, timestamp: Date())
-        }
-    }
-
-    private func refreshAdGuardHistoryIfNeeded() async {
-        let now = Date()
-        if let lastBackgroundAdGuardRefresh, now.timeIntervalSince(lastBackgroundAdGuardRefresh) < 60 { return }
-        lastBackgroundAdGuardRefresh = now
-
-        let baseURL = KeychainService.load(account: "adguard-url-\(settings.host)") ?? discoveredAdGuardBaseURL() ?? ""
-        let username = KeychainService.load(account: "adguard-user-\(settings.host)") ?? ""
-        let password = KeychainService.load(account: "adguard-password-\(settings.host)") ?? ""
-        guard !baseURL.isEmpty, !username.isEmpty, !password.isEmpty else { return }
-
-        let snapshot = await adGuardAPI.load(baseURL: baseURL, username: username, password: password)
-        guard snapshot.available else { return }
-        adGuard = snapshot
-        adGuardHistory = await telemetryHistoryStore.recordAdGuard(host: settings.host, snapshot: snapshot, timestamp: now)
     }
 
     func refreshSecurityAudit() async {
@@ -377,8 +367,9 @@ final class AppViewModel: ObservableObject {
         async let openVPN = execute(.openVPNBinds, subsystem: "Security")
         async let sshConfig = execute(.sshEffectiveConfig, subsystem: "Security")
         async let authLog = execute(.sshAuthLog24h, subsystem: "Security")
+        async let firewall = execute(.firewallState, subsystem: "Security")
 
-        let values = await (freshListeners, allWireGuard, openVPN, sshConfig, authLog)
+        let values = await (freshListeners, allWireGuard, openVPN, sshConfig, authLog, firewall)
         let parsedListeners = SSParser.parse(values.0.stdout)
         let cleanPort = Int(wireGuard.listenPort)
         let classified = SecurityAuditParser.classifyListeners(
@@ -422,6 +413,14 @@ final class AppViewModel: ObservableObject {
             ssh: ssh,
             lastUpdated: Date()
         )
+        if let nodeID = activeServerID {
+            var names = SecurityAuditParser.wireGuardPorts(values.1.stdout).mapValues { value in value == "wg0" ? "Clean WireGuard" : value.localizedCaseInsensitiveContains("antizapret") ? "AntiZapret WireGuard" : "Full VPN WireGuard" }
+            for (port, profile) in SecurityAuditParser.openVPNPorts(values.2.stdout) { names[port] = profile.localizedCaseInsensitiveContains("antizapret") ? "AntiZapret OpenVPN" : "Full VPN OpenVPN" }
+            exposureEndpoints = ExposureAnalyzer.analyze(listeners: parsedListeners, nodeID: nodeID, publicAddresses: Set([settings.host, system.publicIPv4, system.publicIPv6].filter { !$0.isEmpty && $0 != "—" }), vpnAddresses: Set([wireGuard.address.split(separator: "/").first.map(String.init) ?? ""].filter { !$0.isEmpty }), firewallEvidence: values.5.stdout, serviceNames: names)
+        } else { exposureEndpoints = [] }
+        if let configurationBaseline, let nodeID = activeServerID { baselineDrift = BaselineEngine.diff(baseline: configurationBaseline, current: currentBaseline(nodeID)) }
+        evaluateAlerts()
+        updateFleet()
     }
 
     func runDNSPathTest() async {
@@ -453,6 +452,7 @@ final class AppViewModel: ObservableObject {
         let current = Dictionary(uniqueKeysWithValues: output.split(separator: "\n").compactMap { line -> (String, String)? in
             let fields = line.split(whereSeparator: \.isWhitespace); guard fields.count >= 2 else { return nil }; return (String(fields[1]), String(fields[0]))
         })
+        currentConfigurationHashes = current
         let key = "configurationHashes-\(settings.host)"
         let previous = UserDefaults.standard.dictionary(forKey: key) as? [String: String] ?? [:]
         configurationDrift = current.compactMap { path, hash in previous[path].map { $0 == hash ? nil : "\(path): \($0.prefix(12)) → \(hash.prefix(12))" } ?? nil }
@@ -480,6 +480,8 @@ final class AppViewModel: ObservableObject {
             ProfileStore.revealURL(archive)
         } catch { presentedError = AppError(title: "Emergency Kit failed", message: "The local recovery archive could not be created.", technicalDetails: SecretRedactor.redact(error.localizedDescription), recommendedAction: "Check Application Support permissions and available disk space.") }
     }
+
+    func exportSupportBundle() { do { let profile=servers.first{$0.id == activeServerID}; let node=profile.map { LegacyModelAdapter.node(from:$0) }; let input=SupportBundleInput(applicationVersion:Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "2.0-dev",helperVersion:helperVersion,node:node,health:healthReport,security:security,exposure:exposureEndpoints,samples:monitoringSamples,incidents:incidents,events:monitoringEvents,drift:baselineDrift,logs:logs); let archive=try SupportBundleService.create(input); ProfileStore.revealURL(archive) } catch { presentedError=AppError(title:"Support Bundle failed",message:"The sanitized diagnostic archive could not be created.",technicalDetails:SecretRedactor.redact(error.localizedDescription),recommendedAction:"Review local Application Support permissions and retry.") } }
 
     func downloadBackup(_ backup: BackupRecord) async {
         let folder = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("TunnelDeck/Backups", isDirectory: true)
@@ -524,26 +526,8 @@ final class AppViewModel: ObservableObject {
     }
 
     func loadMonitoringHistory() async {
-        monitoringSamples = await monitoringStore.loadSamples(host: settings.host)
-        monitoringEvents = await monitoringStore.loadEvents(host: settings.host)
-        monitoringIncidents = IncidentEngine.build(from: monitoringEvents)
-        alertRules = await alertRuleStore.load(host: settings.host)
-        peerHistory = await telemetryHistoryStore.loadPeers(host: settings.host)
-        adGuardHistory = await telemetryHistoryStore.loadAdGuard(host: settings.host)
-    }
-
-    func setAlertRuleEnabled(_ id: UUID, enabled: Bool) {
-        guard let index = alertRules.firstIndex(where: { $0.id == id }) else { return }
-        alertRules[index].enabled = enabled
-        let rules = alertRules
-        Task { await alertRuleStore.save(host: settings.host, rules: rules) }
-    }
-
-    func setAlertRuleThreshold(_ id: UUID, threshold: Double) {
-        guard let index = alertRules.firstIndex(where: { $0.id == id }) else { return }
-        alertRules[index].threshold = threshold
-        let rules = alertRules
-        Task { await alertRuleStore.save(host: settings.host, rules: rules) }
+        if let nodeID=activeServerID,let profile=servers.first(where:{$0.id==nodeID}),let persistenceStore { let node=LegacyModelAdapter.node(from:profile);try? await persistenceStore.upsert(node:node);_=try? await LegacyMonitoringImporter().importHistory(for:node,into:persistenceStore);try? await LegacyTelemetryImporter().importHistory(for:node,into:persistenceStore);monitoringSamples=(try? await persistenceStore.samples(nodeID:nodeID)) ?? [];let stored=(try? await persistenceStore.events(nodeID:nodeID)) ?? [];monitoringEvents=stored.filter{$0.kind=="monitoring"}.map{MonitoringEvent(id:$0.id,timestamp:$0.timestamp,component:$0.componentID,title:$0.title,detail:$0.detail,state:$0.state,recovered:$0.isRecovery)};alertEvents=stored.filter{$0.kind=="alert"};peerHistory=(try? await persistenceStore.peerHistory(nodeID:nodeID)) ?? [];adGuardHistory=(try? await persistenceStore.adGuardHistory(nodeID:nodeID)) ?? [];let saved=(try? await persistenceStore.alertRules(nodeID:nodeID)) ?? [];let legacy=(try? await LegacyAlertImporter().rules(for:node)) ?? [];let defaults=AlertEngine.defaultRules(nodeID:nodeID,peerTimeout:settings.handshakeTimeout);let imported=saved.isEmpty ? legacy:saved;let byKind=Dictionary(uniqueKeysWithValues:imported.map{($0.kind,$0)});alertRules=defaults.map{byKind[$0.kind] ?? $0};alertStates=(try? await persistenceStore.alertStates(nodeID:nodeID)) ?? [:];try? await persistenceStore.save(alertRules:alertRules,nodeID:nodeID) } else { monitoringSamples=await monitoringStore.loadSamples(host:settings.host);monitoringEvents=await monitoringStore.loadEvents(host:settings.host) }
+        rebuildIncidents()
     }
 
     private func recordMonitoringState() async {
@@ -555,6 +539,7 @@ final class AppViewModel: ObservableObject {
             .map { "\($0.protocolName.lowercased()):\($0.port)" })).sorted()
 
         let sample = MonitoringSample(
+            nodeID: activeServerID ?? LegacyNodeIdentity.unassigned,
             id: UUID(),
             timestamp: Date(),
             cpuPercent: system.cpuPercent,
@@ -569,34 +554,20 @@ final class AppViewModel: ObservableObject {
             publicListeners: publicListeners
         )
 
-        let previousSample = monitoringSamples.last
-        let result = await monitoringStore.record(host: settings.host, sample: sample)
-        monitoringSamples = result.samples
-        monitoringEvents = result.events
-        monitoringIncidents = IncidentEngine.build(from: monitoringEvents)
-        peerHistory = await telemetryHistoryStore.recordPeers(host: settings.host, peers: wireGuard.peers, timestamp: sample.timestamp)
-
-        if settings.notificationsEnabled {
-            let lastFired = loadAlertFireTimes()
-            let evaluation = AlertRuleEngine.evaluate(
-                previous: previousSample,
-                current: sample,
-                newEvents: result.newEvents,
-                rules: alertRules,
-                lastFired: lastFired,
-                now: sample.timestamp
-            )
-            var updatedFireTimes = lastFired
-            for trigger in evaluation.triggers {
-                NotificationService.send(
-                    title: trigger.title,
-                    body: trigger.detail,
-                    id: "tunneldeck-\(settings.host)-alert-\(trigger.ruleID.uuidString)-\(trigger.recovered)"
-                )
-                if !trigger.recovered { updatedFireTimes[trigger.ruleID.uuidString] = sample.timestamp.timeIntervalSince1970 }
-            }
-            saveAlertFireTimes(updatedFireTimes)
+        if let nodeID=activeServerID,let persistenceStore {
+            let newEvents=MonitoringEventBuilder.events(from:monitoringSamples.last,to:sample)
+            try? await persistenceStore.insert(sample:sample,nodeID:nodeID)
+            for event in newEvents { try? await persistenceStore.insert(event:LegacyModelAdapter.event(from:event,nodeID:nodeID)) }
+            monitoringSamples=(try? await persistenceStore.samples(nodeID:nodeID)) ?? monitoringSamples
+            let stored=(try? await persistenceStore.events(nodeID:nodeID)) ?? []
+            monitoringEvents=stored.filter{$0.kind=="monitoring"}.map{MonitoringEvent(id:$0.id,timestamp:$0.timestamp,component:$0.componentID,title:$0.title,detail:$0.detail,state:$0.state,recovered:$0.isRecovery)}
+        } else {
+            let result=await monitoringStore.record(host:settings.host,sample:sample)
+            monitoringSamples=result.samples;monitoringEvents=result.events
         }
+        if let nodeID=activeServerID,let persistenceStore,lastPeerHistorySample.map({sample.timestamp.timeIntervalSince($0)>=30}) ?? true { for peer in wireGuard.peers { try? await persistenceStore.insert(peer:PeerHistorySample(nodeID:nodeID,id:UUID(),timestamp:sample.timestamp,peerID:peer.id,name:peer.name,vpnIP:peer.vpnIP,status:peer.status,receivedBytes:peer.receivedBytes,sentBytes:peer.sentBytes,latestHandshake:peer.latestHandshake)) };peerHistory=(try? await persistenceStore.peerHistory(nodeID:nodeID)) ?? peerHistory;lastPeerHistorySample=sample.timestamp }
+        rebuildIncidents()
+
     }
 
     private func monitoredUnitState(where predicate: (UnitStatus) -> Bool) -> HealthState {
@@ -605,13 +576,20 @@ final class AppViewModel: ObservableObject {
         return unit.activeState == "active" ? .online : .offline
     }
 
-    private func loadAlertFireTimes() -> [String: Double] {
-        UserDefaults.standard.dictionary(forKey: "alertFireTimes-\(settings.host)") as? [String: Double] ?? [:]
-    }
+    private func rebuildIncidents() { guard let nodeID = activeServerID else { incidents = []; return }; incidents = IncidentEngine.incidents(events: monitoringEvents, nodeID: nodeID); evaluateAlerts(); updateFleet() }
 
-    private func saveAlertFireTimes(_ values: [String: Double]) {
-        UserDefaults.standard.set(values, forKey: "alertFireTimes-\(settings.host)")
-    }
+    var activeNodeName: String { servers.first(where: { $0.id == activeServerID })?.name ?? (system.hostname == "—" ? "VPS" : system.hostname) }
+    func updateFleet() { fleetSummaries = fleetController.summaries(profiles: servers, activeID: activeServerID, system: system, wireGuard: wireGuard, units: units, security: security, incidents: incidents) }
+    func exposureName(_ endpoint: NetworkEndpoint) -> String { ExposureAnalyzer.displayName(endpoint, listeners: listeners) }
+    private func currentBaseline(_ nodeID: UUID) -> ConfigurationBaseline { BaselineEngine.capture(nodeID: nodeID, endpoints: exposureEndpoints, units: units, wireGuard: wireGuard, ssh: security.ssh, hashes: currentConfigurationHashes) }
+    func setCurrentBaseline() async { guard let nodeID = activeServerID else { return }; let baseline = currentBaseline(nodeID); if let profile = servers.first(where: { $0.id == nodeID }), let persistenceStore { try? await persistenceStore.upsert(node: LegacyModelAdapter.node(from: profile)); try? await persistenceStore.save(baseline: baseline) }; configurationBaseline = baseline; baselineDrift = []; evaluateAlerts() }
+    func loadBaseline() async { guard let nodeID = activeServerID, let persistenceStore else { return }; configurationBaseline = try? await persistenceStore.latestBaseline(nodeID: nodeID); if let configurationBaseline { baselineDrift = BaselineEngine.diff(baseline: configurationBaseline, current: currentBaseline(nodeID)) } }
+    private func configureDefaultAlerts() { guard let nodeID = activeServerID, alertRules.isEmpty else { return }; alertRules=AlertEngine.defaultRules(nodeID:nodeID,peerTimeout:settings.handshakeTimeout) }
+    private func evaluateAlerts() { let conditions:[AlertRuleKind:Bool]=[.nodeOffline:system.health == .offline,.wireGuardOffline:system.health == .online && wireGuard.state == .offline,.adGuardOffline:system.health == .online && monitoredUnitState{$0.name.localizedCaseInsensitiveContains("AdGuardHome")} == .offline,.antiZapretOffline:system.health == .online && monitoredUnitState{$0.name == "antizapret.service"} == .offline,.disk:system.diskPercent >= threshold(.disk,90),.memory:system.memoryPercent >= threshold(.memory,90),.ping:(system.pingMilliseconds ?? 0) >= threshold(.ping,250),.publicDNS:exposureEndpoints.contains{$0.port == 53 && $0.classification == .publicInternet},.newPublicListener:baselineDrift.contains{$0.category == "public-listener" && $0.kind == .added},.peerInactive:wireGuard.peers.contains{$0.status == .offline},.configurationDrift:!baselineDrift.isEmpty];let result=AlertEngine.evaluate(rules:alertRules,conditions:conditions,previous:alertStates);alertStates=result.states;alertEvents.append(contentsOf:result.events);if settings.notificationsEnabled{for event in result.events{NotificationService.send(title:event.title,body:event.detail,id:"tunneldeck-alert-\(event.id.uuidString)")}};if let nodeID=activeServerID,let persistenceStore{Task{try? await persistenceStore.save(alertStates:result.states,nodeID:nodeID);for event in result.events{try? await persistenceStore.insert(event:event)}}} }
+    private func threshold(_ kind:AlertRuleKind,_ fallback:Double)->Double{alertRules.first{$0.kind==kind}?.threshold ?? fallback}
+    func saveAlertRules(){guard let nodeID=activeServerID,let persistenceStore else{return};let rules=alertRules;Task{try? await persistenceStore.save(alertRules:rules,nodeID:nodeID)}}
+    func acknowledge(_ id: UUID) { guard var state=alertStates[id] else{return}; state.acknowledgedAt=Date(); alertStates[id]=state;if let nodeID=activeServerID,let persistenceStore{let states=alertStates;Task{try? await persistenceStore.save(alertStates:states,nodeID:nodeID)}} }
+    private func sampleAdGuardHistoryIfNeeded()async{let now=Date();guard lastAdGuardHistorySample.map({now.timeIntervalSince($0)>=60}) ?? true else{return};await refreshAdGuardAPI();guard adGuard.available,let nodeID=activeServerID,let persistenceStore else{return};let sample=AdGuardHistorySample(nodeID:nodeID,id:UUID(),timestamp:now,totalQueries:adGuard.totalQueries,blockedQueries:adGuard.blockedQueries,blockedPercentage:adGuard.blockedPercentage,averageProcessingTime:adGuard.averageProcessingTime);try? await persistenceStore.insert(adGuard:sample);adGuardHistory=(try? await persistenceStore.adGuardHistory(nodeID:nodeID)) ?? adGuardHistory;lastAdGuardHistorySample=now}
 
     func testSSH() async -> Bool {
         let result = await execute(.uname, subsystem: "SSH Test")
@@ -661,10 +639,10 @@ final class AppViewModel: ObservableObject {
 }
 
 enum SidebarSection: String, CaseIterable, Identifiable {
-    case dashboard = "Dashboard", doctor = "Doctor", monitoring = "Monitoring", wireGuard = "WireGuard", profiles = "Profiles", dns = "DNS & AdGuard", antiZapret = "AntiZapret", services = "Services", diagnostics = "Diagnostics", security = "Security", backups = "Backups", activity = "Activity", recovery = "Recovery", router = "Router", homeAccess = "Home Access", logs = "Logs", settings = "Settings"
+    case fleet = "Fleet Overview", topology = "Topology", dashboard = "Node Dashboard", incidents = "Incidents", exposure = "Exposure", baseline = "Baseline & Drift", alerts = "Alert Rules", doctor = "Doctor", monitoring = "Monitoring", wireGuard = "WireGuard", profiles = "Profiles", dns = "DNS & AdGuard", antiZapret = "AntiZapret", services = "Services", diagnostics = "Diagnostics", security = "Security", backups = "Backups", activity = "Activity", recovery = "Recovery", router = "Router", homeAccess = "Home Access", logs = "Logs", settings = "Settings"
     var id: String { rawValue }
     var icon: String {
-        switch self { case .dashboard: "gauge"; case .doctor: "cross.case"; case .monitoring: "waveform.path.ecg"; case .wireGuard: "network"; case .profiles: "doc.text"; case .antiZapret: "shield.lefthalf.filled"; case .dns: "server.rack"; case .services: "gearshape.2"; case .diagnostics: "stethoscope"; case .security: "lock.shield"; case .backups: "externaldrive.badge.timemachine"; case .activity: "clock.arrow.circlepath"; case .recovery: "lifepreserver"; case .router: "wifi.router"; case .homeAccess: "house"; case .logs: "list.bullet.rectangle"; case .settings: "gear" }
+        switch self { case .fleet: "server.rack"; case .topology: "point.3.connected.trianglepath.dotted"; case .dashboard: "gauge"; case .incidents: "exclamationmark.triangle"; case .exposure: "network.badge.shield.half.filled"; case .baseline: "scope"; case .alerts: "bell.badge"; case .doctor: "cross.case"; case .monitoring: "waveform.path.ecg"; case .wireGuard: "network"; case .profiles: "doc.text"; case .antiZapret: "shield.lefthalf.filled"; case .dns: "server.rack"; case .services: "gearshape.2"; case .diagnostics: "stethoscope"; case .security: "lock.shield"; case .backups: "externaldrive.badge.timemachine"; case .activity: "clock.arrow.circlepath"; case .recovery: "lifepreserver"; case .router: "wifi.router"; case .homeAccess: "house"; case .logs: "list.bullet.rectangle"; case .settings: "gear" }
     }
 }
 
