@@ -62,6 +62,8 @@ actor InfrastructureStore {
 
     func sampleCount(nodeID: UUID) throws -> Int { Int(try scalar("SELECT count(*) FROM monitoring_samples WHERE node_id=?", [.text(nodeID.uuidString)])) }
     func eventCount(nodeID: UUID) throws -> Int { Int(try scalar("SELECT count(*) FROM infrastructure_events WHERE node_id=?", [.text(nodeID.uuidString)])) }
+    func save(baseline: ConfigurationBaseline) throws { let payload = String(data: try JSONEncoder().encode(baseline), encoding: .utf8)!; try run("INSERT INTO configuration_baselines(id,node_id,created_at,payload) VALUES(?,?,?,?)", [.text(baseline.id.uuidString),.text(baseline.nodeID.uuidString),.date(baseline.createdAt),.text(payload)]) }
+    func latestBaseline(nodeID: UUID) throws -> ConfigurationBaseline? { let rows: [String] = try query("SELECT payload FROM configuration_baselines WHERE node_id='\(nodeID.uuidString)' ORDER BY created_at DESC LIMIT 1") { Self.text($0,0) }; return rows.first.flatMap { try? JSONDecoder().decode(ConfigurationBaseline.self, from: Data($0.utf8)) } }
 
     private static func configure(_ db: OpaquePointer?) throws {
         try exec(db, "PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")
