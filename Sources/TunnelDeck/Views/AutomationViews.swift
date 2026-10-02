@@ -17,10 +17,9 @@ struct DoctorView: View {
 
 struct MonitoringView: View {
     @EnvironmentObject var model: AppViewModel
-    @State private var windowHours = 6
 
     private var filteredSamples: [MonitoringSample] {
-        let cutoff = Date().addingTimeInterval(-Double(windowHours) * 3600)
+        let cutoff = Date().addingTimeInterval(-Double(model.monitoringWindowHours) * 3600)
         return model.monitoringSamples.filter { $0.timestamp >= cutoff }
     }
 
@@ -57,7 +56,7 @@ struct MonitoringView: View {
 
                 MetricCard(title: "History", icon: "chart.xyaxis.line") {
                     VStack(alignment: .leading, spacing: 12) {
-                        Picker("Window", selection: $windowHours) {
+                        Picker("Window", selection: $model.monitoringWindowHours) {
                             Text("1 hour").tag(1)
                             Text("6 hours").tag(6)
                             Text("24 hours").tag(24)
