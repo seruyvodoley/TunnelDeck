@@ -60,7 +60,7 @@ actor AdGuardAPIService {
 
     static func parseQueryLog(_ payload: [String: Any]) -> [AdGuardQueryEntry] {
         let data = payload["data"] as? [[String: Any]] ?? []
-        return data.enumerated().compactMap { index, item in
+        return data.enumerated().compactMap { index, item -> AdGuardQueryEntry? in
             guard let question = item["question"] as? [String: Any],
                   let domain = question["name"] as? String,
                   !domain.isEmpty else { return nil }
