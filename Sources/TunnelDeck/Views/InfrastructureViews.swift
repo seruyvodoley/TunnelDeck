@@ -72,14 +72,14 @@ struct ProfilesView: View {
 
 struct AntiZapretView: View {
     @EnvironmentObject var model: AppViewModel
-    var body: some View { ScrollView { VStack(alignment: .leading, spacing: 18) { Text("Services").font(.title2.bold()); ForEach(model.units.filter { $0.name.contains("antizapret") || $0.name.contains("vpn-udp") || $0.name.contains("wg-quick@vpn") }) { unit in HStack { StatusDot(state: unit.health); Text(unit.name); Spacer(); Text("\(unit.activeState) / \(unit.subState)").foregroundStyle(.secondary) }.padding(10).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10)) }; Text("Setup flags").font(.title2.bold()); Grid(alignment: .leading, horizontalSpacing: 30, verticalSpacing: 10) { ForEach(model.antiZapretSettings.keys.sorted(), id: \.self) { key in GridRow { Text(key).foregroundStyle(.secondary); Text(model.antiZapretSettings[key] ?? "—").textSelection(.enabled) } } }; HStack { Button("View Logs") { model.selectedSection = .logs }; Button("Restart") {}.disabled(true); Button("Update Lists") {}.disabled(true) } }.padding(20).frame(maxWidth: 850, alignment: .leading) } }
+    var body: some View { ScrollView { VStack(alignment: .leading, spacing: 18) { Text("Services").font(.title2.bold()); ForEach(model.units.filter { $0.name.contains("antizapret") || $0.name.contains("vpn-udp") || $0.name.contains("wg-quick@vpn") }) { unit in HStack { StatusDot(state: unit.health); Text(unit.name); Spacer(); Text("\(unit.activeState) / \(unit.subState)").foregroundStyle(.secondary) }.padding(10).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10)) }; Text("Setup flags").font(.title2.bold()); Grid(alignment: .leading, horizontalSpacing: 30, verticalSpacing: 10) { ForEach(model.antiZapretSettings.keys.sorted(), id: \.self) { key in GridRow { Text(key).foregroundStyle(.secondary); Text(model.antiZapretSettings[key] ?? "—").textSelection(.enabled) } } }; HStack { Button("View Logs") { model.selectedSection = .logs }; Button("Restart") { Task { _ = await model.performServiceAction("restart", unit: "antizapret.service") } }.disabled(!model.settings.writeModeEnabled || model.helperVersion != HelperService.localVersion); Button("Update Lists (not implemented)") {}.disabled(true) } }.padding(20).frame(maxWidth: 850, alignment: .leading) } }
 }
 
 struct DNSView: View {
     @EnvironmentObject var model: AppViewModel
     @StateObject private var state = DNSViewState()
     var dns: [Listener] { model.listeners.filter { $0.port == 53 } }
-    var web: [Listener] { model.listeners.filter { $0.port == 3000 } }
+    var web: [Listener] { model.listeners.filter { $0.protocolName.lowercased().hasPrefix("tcp") && $0.port != 53 && $0.process.localizedCaseInsensitiveContains("AdGuardHome") } }
 
     var body: some View {
         let serverIP = model.wireGuard.address.split(separator: "/").first.map(String.init) ?? ""
@@ -105,12 +105,12 @@ struct DNSView: View {
                         Text("Filters: \(model.adGuard.filters.joined(separator: ", "))")
                         Text("Recent queries: \(model.adGuard.queryLog.prefix(10).joined(separator: ", "))")
                         HStack {
-                            Button("Login") { state.baseURL = "http://\(serverIP):3000"; state.showLogin = true }
+                            Button("Login") { state.baseURL = model.discoveredAdGuardBaseURL() ?? ""; state.error = nil; state.showLogin = true }
                             Button("Refresh API") { Task { await model.refreshAdGuardAPI() } }
                         }
                     }
                 }
-                Button("Open AdGuard") { if !serverIP.isEmpty { LocalNetworkService.open("http://\(serverIP):3000") } }
+                Button("Open AdGuard") { if let url = model.discoveredAdGuardBaseURL() { LocalNetworkService.open(url) } }.disabled(model.discoveredAdGuardBaseURL() == nil)
             }.padding(20)
         }
         .sheet(isPresented: $state.showLogin) {
@@ -120,12 +120,27 @@ struct DNSView: View {
                 TextField("Username", text: $state.username)
                 SecureField("Password", text: $state.password)
                 Text("Credentials are stored only in macOS Keychain. Authorization headers are never logged.").foregroundStyle(.secondary)
+                if let error = state.error { Text(error).foregroundStyle(.red).textSelection(.enabled) }
                 HStack {
-                    Spacer(); Button("Cancel") { state.showLogin = false }
-                    Button("Save and Connect") {
-                        let password = state.password; state.password = ""; state.showLogin = false
-                        Task { await model.saveAdGuardCredentials(baseURL: state.baseURL, username: state.username, password: password) }
-                    }.buttonStyle(.borderedProminent)
+                    Spacer()
+                    Button("Cancel") { state.showLogin = false }.disabled(state.connecting)
+                    Button(state.connecting ? "Connecting…" : "Save and Connect") {
+                        let password = state.password
+                        state.connecting = true
+                        state.error = nil
+                        Task {
+                            let success = await model.saveAdGuardCredentials(baseURL: state.baseURL, username: state.username, password: password)
+                            state.connecting = false
+                            if success {
+                                state.password = ""
+                                state.showLogin = false
+                            } else {
+                                state.error = model.adGuard.error ?? "Connection or authentication failed"
+                            }
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(state.connecting || state.baseURL.isEmpty || state.username.isEmpty || state.password.isEmpty)
                 }
             }.padding(24).frame(width: 520)
         }
@@ -148,11 +163,13 @@ struct DNSView: View {
     @Published var baseURL = ""
     @Published var username = ""
     @Published var password = ""
+    @Published var error: String?
+    @Published var connecting = false
 }
 
 struct DiagnosticsView: View {
     @EnvironmentObject var model: AppViewModel
-    var body: some View { ScrollView { VStack(alignment: .leading, spacing: 18) { HStack { diagnosticButton("SSH Test", .uname); diagnosticButton("Ping Internet", .pingInternet); diagnosticButton("DNS Resolution", .dnsTest); diagnosticButton("WireGuard Status", .wireGuard); diagnosticButton("Detect iperf3", .iperfDetection) }; GroupBox("Leak tests") { Grid(alignment: .leading, horizontalSpacing: 20, verticalSpacing: 8) { GridRow { Text("Check").bold(); Text("Expected").bold(); Text("Actual").bold(); Text("Result").bold() }; leakRow("Public IPv4", model.system.publicIPv4, model.system.macPublicIP); leakRow("IPv6", "Disabled or explicitly routed", model.system.publicIPv6); leakRow("VPN DNS", model.wireGuard.address.split(separator: "/").first.map(String.init) ?? "Configured resolver", model.listeners.filter { $0.port == 53 }.map(\.address).joined(separator: ", ")); leakRow("Default route", "Configured policy", model.system.macLANIP) } .padding(8) }; GroupBox("iperf3 — manual only") { HStack { Text("TCP upload/download and UDP tests are intentionally not started automatically."); Spacer(); Button("Run iperf3…") {}.disabled(true) }.padding(8) }; if !model.diagnostics.isEmpty { Chart(model.diagnostics.suffix(30)) { item in BarMark(x: .value("Test", item.date), y: .value("Duration", item.milliseconds ?? 0)).foregroundStyle(item.success ? .green : .red) }.frame(height: 220) }; Table(model.diagnostics.reversed()) { TableColumn("Time") { Text($0.date.formatted(date: .abbreviated, time: .standard)) }; TableColumn("Test", value: \.name); TableColumn("Result") { Text($0.success ? "Passed" : "Failed").foregroundStyle($0.success ? .green : .red) }; TableColumn("Summary", value: \.summary) }.frame(minHeight: 260) }.padding(20) } }
+    var body: some View { ScrollView { VStack(alignment: .leading, spacing: 18) { HStack { diagnosticButton("SSH Test", .uname); diagnosticButton("Ping Internet", .pingInternet); diagnosticButton("DNS Resolution", .dnsTest); diagnosticButton("WireGuard Status", .wireGuard); diagnosticButton("Detect iperf3", .iperfDetection) }; GroupBox("Network visibility snapshot") { Grid(alignment: .leading, horizontalSpacing: 20, verticalSpacing: 8) { GridRow { Text("Check").bold(); Text("Expected").bold(); Text("Actual").bold(); Text("Data").bold() }; leakRow("Public IPv4", model.system.publicIPv4, model.system.macPublicIP); leakRow("IPv6", "Disabled or explicitly routed", model.system.publicIPv6); leakRow("VPN DNS", model.wireGuard.address.split(separator: "/").first.map(String.init) ?? "Configured resolver", model.listeners.filter { $0.port == 53 }.map(\.address).joined(separator: ", ")); leakRow("Default route", "Configured policy", model.system.macLANIP) } .padding(8) }; GroupBox("iperf3 — manual only") { HStack { Text("TCP upload/download and UDP tests are intentionally not started automatically."); Spacer(); Button("Run iperf3…") {}.disabled(true) }.padding(8) }; if !model.diagnostics.isEmpty { Chart(model.diagnostics.suffix(30)) { item in BarMark(x: .value("Test", item.date), y: .value("Duration", item.milliseconds ?? 0)).foregroundStyle(item.success ? .green : .red) }.frame(height: 220) }; Table(model.diagnostics.reversed()) { TableColumn("Time") { Text($0.date.formatted(date: .abbreviated, time: .standard)) }; TableColumn("Test", value: \.name); TableColumn("Result") { Text($0.success ? "Passed" : "Failed").foregroundStyle($0.success ? .green : .red) }; TableColumn("Summary", value: \.summary) }.frame(minHeight: 260) }.padding(20) } }
     private func diagnosticButton(_ title: String, _ command: ReadCommand) -> some View { Button(title) { Task { await model.runDiagnostic(command, name: title) } } }
     private func leakRow(_ name: String, _ expected: String, _ actual: String) -> some View { GridRow { Text(name); Text(expected).foregroundStyle(.secondary); Text(actual).textSelection(.enabled); Image(systemName: actual.isEmpty || actual == "—" ? "xmark.circle.fill" : "checkmark.circle.fill").foregroundStyle(actual.isEmpty || actual == "—" ? .red : .green) } }
 }
