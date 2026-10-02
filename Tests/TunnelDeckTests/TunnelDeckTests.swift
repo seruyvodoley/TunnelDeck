@@ -253,3 +253,61 @@ import Testing
     #expect(!DNSPathEvaluator.isBlocked([]))
     #expect(!DNSPathEvaluator.isBlocked(["142.251.14.155"]))
 }
+
+@Test func sshSecurityAuditFlagsRootPasswordLogin() {
+    let config = """
+    port 22
+    passwordauthentication yes
+    kbdinteractiveauthentication no
+    pubkeyauthentication yes
+    permitrootlogin yes
+    permitemptypasswords no
+    maxauthtries 6
+    maxsessions 10
+    x11forwarding yes
+    allowtcpforwarding yes
+    """
+    let log = """
+    2026-10-03T01:00:00+00:00 host sshd[1]: Failed password for invalid user admin from 203.0.113.2 port 1234 ssh2
+    2026-10-03T02:00:00+00:00 host sshd[2]: Accepted publickey for root from 198.51.100.2 port 4321 ssh2
+    """
+    let snapshot = SecurityAuditParser.parseSSHConfig(config, configuredPort: 22, authLog: log)
+    #expect(snapshot.state == .critical)
+    #expect(snapshot.failedLogins24h == 1)
+    #expect(snapshot.successfulLogins24h == 1)
+    #expect(snapshot.findings.contains("Root password login is effectively allowed."))
+}
+
+@Test func securityListenerClassificationGroupsIPv4IPv6AndNamesVPNs() {
+    let listeners = [
+        Listener(protocolName: "udp", address: "0.0.0.0", port: 51820, process: ""),
+        Listener(protocolName: "udp", address: "::", port: 51820, process: ""),
+        Listener(protocolName: "udp", address: "0.0.0.0", port: 51443, process: ""),
+        Listener(protocolName: "udp", address: "0.0.0.0", port: 50443, process: "users:((\"openvpn\",pid=1,fd=3))"),
+        Listener(protocolName: "tcp", address: "0.0.0.0", port: 22, process: "users:((\"sshd\",pid=2,fd=3))"),
+        Listener(protocolName: "tcp", address: "10.66.66.1", port: 80, process: "users:((\"AdGuardHome\",pid=3,fd=3))")
+    ]
+    let wgAll = """
+    interface: antizapret
+      listening port: 51443
+    interface: wg0
+      listening port: 51820
+    """
+    let ovpn = """
+    [/etc/openvpn/server/antizapret-udp.conf]
+    port 50443
+    proto udp4
+    """
+    let result = SecurityAuditParser.classifyListeners(
+        listeners,
+        host: "203.0.113.10",
+        cleanWireGuardPort: 51820,
+        wireGuardAll: wgAll,
+        openVPNBinds: ovpn
+    )
+    #expect(result.public.count == 3)
+    #expect(result.public.contains { $0.service == "Clean WireGuard" && $0.addresses.count == 2 })
+    #expect(result.public.contains { $0.service == "AntiZapret WireGuard" })
+    #expect(result.public.contains { $0.service == "AntiZapret OpenVPN" })
+    #expect(result.private.contains { $0.service == "AdGuard Web" && $0.state == .online })
+}

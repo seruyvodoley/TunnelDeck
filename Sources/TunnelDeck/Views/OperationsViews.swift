@@ -47,10 +47,28 @@ struct ServicesView: View {
 
 struct SecurityView: View {
     @EnvironmentObject var model: AppViewModel
-    private var publicListeners: [Listener] { model.listeners.filter { $0.isPublic || (!model.settings.host.isEmpty && $0.address == model.settings.host) } }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
+                HStack {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Security").font(.title2.bold())
+                        HStack(spacing: 8) {
+                            StatusDot(state: model.security.state)
+                            Text(securityLabel).foregroundStyle(.secondary)
+                            if let updated = model.security.lastUpdated {
+                                Text("· \(updated.formatted(date: .omitted, time: .standard))").foregroundStyle(.tertiary)
+                            }
+                        }
+                    }
+                    Spacer()
+                    Button(model.isRefreshingSecurity ? "Auditing…" : "Run Security Audit") {
+                        Task { await model.refreshSecurityAudit() }
+                    }
+                    .disabled(model.isRefreshingSecurity)
+                }
+
                 MetricCard(title: "Connection Security", icon: "key") {
                     VStack(spacing: 8) {
                         KeyValueRow(key: "SSH host", value: "\(model.settings.username)@\(model.settings.host):\(model.settings.port)")
@@ -59,14 +77,130 @@ struct SecurityView: View {
                         KeyValueRow(key: "Write mode", value: model.settings.writeModeEnabled ? "Enabled" : "Disabled")
                     }
                 }
-                MetricCard(title: "Public Listeners", icon: "network.badge.shield.half.filled") {
-                    VStack(alignment: .leading, spacing: 8) {
-                        if publicListeners.isEmpty { Label("No public listeners detected", systemImage: "checkmark.circle.fill").foregroundStyle(.green) }
-                        ForEach(publicListeners) { listener in HStack { StatusDot(state: listener.port == 53 || listener.process.localizedCaseInsensitiveContains("AdGuardHome") ? .critical : .warning); Text("\(listener.protocolName) \(listener.address):\(listener.port)"); Spacer(); Text(listener.process).foregroundStyle(.secondary) } }
+
+                MetricCard(title: "Public Services", icon: "network.badge.shield.half.filled") {
+                    VStack(alignment: .leading, spacing: 10) {
+                        if model.security.publicListeners.isEmpty {
+                            Text(model.security.lastUpdated == nil ? "Run Security Audit to classify public services." : "No public listeners detected.")
+                                .foregroundStyle(.secondary)
+                        }
+                        ForEach(model.security.publicListeners) { listener in
+                            listenerRow(listener)
+                        }
                     }
                 }
-                Text("This screen audits discovered public listeners. Deeper SSH-policy, permission and failed-login auditing is not implemented in this build.").foregroundStyle(.secondary)
-            }.padding(20)
+
+                MetricCard(title: "VPN / Private Services", icon: "lock.shield") {
+                    VStack(alignment: .leading, spacing: 10) {
+                        if model.security.privateListeners.isEmpty {
+                            Text("No private AdGuard/WireGuard listeners classified.").foregroundStyle(.secondary)
+                        }
+                        ForEach(model.security.privateListeners) { listener in
+                            listenerRow(listener)
+                        }
+                    }
+                }
+
+                MetricCard(title: "SSH Hardening", icon: "terminal") {
+                    if !model.security.ssh.available {
+                        Text(model.security.lastUpdated == nil ? "Run Security Audit to inspect the effective sshd policy." : "Effective sshd configuration was not available.")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        VStack(alignment: .leading, spacing: 9) {
+                            securitySetting("Port", model.security.ssh.port, state: sshPortState)
+                            securitySetting("Public-key auth", model.security.ssh.pubkeyAuthentication, state: model.security.ssh.pubkeyAuthentication == "yes" ? .online : .critical)
+                            securitySetting("Password auth", model.security.ssh.passwordAuthentication, state: model.security.ssh.passwordAuthentication == "yes" ? .warning : .online)
+                            securitySetting("Keyboard-interactive", model.security.ssh.keyboardInteractiveAuthentication, state: model.security.ssh.keyboardInteractiveAuthentication == "yes" ? .warning : .online)
+                            securitySetting("Root login", model.security.ssh.permitRootLogin, state: rootLoginState)
+                            securitySetting("Empty passwords", model.security.ssh.permitEmptyPasswords, state: model.security.ssh.permitEmptyPasswords == "yes" ? .critical : .online)
+                            securitySetting("MaxAuthTries", model.security.ssh.maxAuthTries, state: maxAuthTriesState)
+                            securitySetting("MaxSessions", model.security.ssh.maxSessions, state: .online)
+                            securitySetting("X11 forwarding", model.security.ssh.x11Forwarding, state: .online)
+                            securitySetting("TCP forwarding", model.security.ssh.allowTCPForwarding, state: .online)
+
+                            if !model.security.ssh.findings.isEmpty {
+                                Divider()
+                                ForEach(model.security.ssh.findings, id: \.self) { finding in
+                                    Label(finding, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                MetricCard(title: "SSH Authentication · last 24h", icon: "person.badge.key") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        KeyValueRow(key: "Failed / suspicious", value: String(model.security.ssh.failedLogins24h))
+                        KeyValueRow(key: "Successful", value: String(model.security.ssh.successfulLogins24h))
+                        KeyValueRow(key: "Last successful", value: model.security.ssh.lastSuccessfulLogin)
+                        Text("Counts are read from systemd journal entries for ssh/sshd and may be incomplete if journal retention is limited.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                Text("Security Audit is read-only. It reads active sockets, WireGuard/OpenVPN bind metadata, effective sshd settings and recent SSH journal entries; it does not change firewall or SSH configuration.")
+                    .foregroundStyle(.secondary)
+            }
+            .padding(20)
+        }
+        .task {
+            if model.security.lastUpdated == nil {
+                await model.refreshSecurityAudit()
+            }
+        }
+    }
+
+    private var securityLabel: String {
+        switch model.security.state {
+        case .online: return "Healthy"
+        case .warning: return "Review recommended"
+        case .critical: return "Critical findings"
+        case .offline: return "Unavailable"
+        case .unknown: return "Not audited"
+        }
+    }
+
+    private var sshPortState: HealthState {
+        guard let effective = Int(model.security.ssh.port) else { return .warning }
+        return effective == model.settings.port ? .online : .warning
+    }
+
+    private var rootLoginState: HealthState {
+        let root = model.security.ssh.permitRootLogin
+        if root == "yes" && model.security.ssh.passwordAuthentication == "yes" { return .critical }
+        if root == "yes" { return .warning }
+        return .online
+    }
+
+    private var maxAuthTriesState: HealthState {
+        guard let value = Int(model.security.ssh.maxAuthTries) else { return .warning }
+        return value > 6 ? .warning : .online
+    }
+
+    private func listenerRow(_ listener: SecurityListener) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            StatusDot(state: listener.state)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(listener.service).fontWeight(.semibold)
+                Text("\(listener.protocolName.uppercased()) \(listener.addresses.joined(separator: ", ")):\(listener.port)")
+                    .font(.system(.caption, design: .monospaced))
+                    .textSelection(.enabled)
+                Text(listener.note).font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer()
+            if !listener.process.isEmpty {
+                Text(listener.process).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            }
+        }
+    }
+
+    private func securitySetting(_ name: String, _ value: String, state: HealthState) -> some View {
+        HStack {
+            StatusDot(state: state)
+            Text(name)
+            Spacer()
+            Text(value).font(.system(.body, design: .monospaced)).textSelection(.enabled)
         }
     }
 }

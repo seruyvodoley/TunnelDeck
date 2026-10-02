@@ -1,4 +1,4 @@
-# TunnelDeck 1.2.4
+# TunnelDeck 1.2.5
 
 Native macOS control panel for a self-hosted WireGuard, AntiZapret and AdGuard Home VPS. Built with Swift, SwiftUI and the system OpenSSH client—no Electron, embedded terminal, passwords or private keys in the app bundle.
 
@@ -136,6 +136,14 @@ swift test
 ```
 
 `swift test` requires a full Xcode installation because the suite uses Swift Testing macros. The helper tests use system Python and never connect to a production server.
+
+## 1.2.5 Security 2.0
+
+- Security groups IPv4/IPv6 sockets into logical services and labels clean WireGuard, AntiZapret WireGuard, full-VPN WireGuard, AntiZapret/OpenVPN and SSH from live server metadata instead of raw ports alone.
+- Private AdGuard/WireGuard listeners are shown separately from internet-facing services; public AdGuard DNS or web binds remain critical.
+- A read-only SSH audit reads the effective `sshd -T` policy and highlights public-key, password, keyboard-interactive, root-login, empty-password, port and MaxAuthTries settings.
+- The Security screen summarizes successful and failed/suspicious SSH journal events from the last 24 hours and shows the most recent successful login line.
+- Security Audit never edits sshd, firewall, VPN or service configuration.
 
 ## 1.2.4 AdGuard dashboard and DNS Path Test
 

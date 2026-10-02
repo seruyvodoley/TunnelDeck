@@ -36,6 +36,8 @@ final class AppViewModel: ObservableObject {
     @Published var adGuard = AdGuardSnapshot()
     @Published var dnsPath = DNSPathSnapshot()
     @Published var isRunningDNSPathTest = false
+    @Published var security = SecuritySnapshot()
+    @Published var isRefreshingSecurity = false
 
     let ssh = SSHService()
     let adGuardAPI = AdGuardAPIService()
@@ -80,7 +82,7 @@ final class AppViewModel: ObservableObject {
     func selectServer(_ id: UUID) {
         guard let server = servers.first(where: { $0.id == id }) else { return }
         activeServerID = id; UserDefaults.standard.set(id.uuidString, forKey: "activeServerID"); settings.host = server.host; settings.port = server.port; settings.username = server.username; settings.keyPath = server.keyPath
-        system = SystemSnapshot(); wireGuard = WireGuardSnapshot(); units = []; listeners = []; healthReport = nil; loadServerScopedState()
+        system = SystemSnapshot(); wireGuard = WireGuardSnapshot(); units = []; listeners = []; healthReport = nil; security = SecuritySnapshot(); loadServerScopedState()
         saveSettings(); Task { await refresh() }
     }
 
@@ -327,6 +329,63 @@ final class AppViewModel: ObservableObject {
             return
         }
         adGuard = await adGuardAPI.load(baseURL: baseURL, username: username, password: password)
+    }
+
+    func refreshSecurityAudit() async {
+        guard !isRefreshingSecurity else { return }
+        isRefreshingSecurity = true
+        defer { isRefreshingSecurity = false }
+
+        async let freshListeners = execute(.listeners, subsystem: "Security")
+        async let allWireGuard = execute(.wireGuardAll, subsystem: "Security")
+        async let openVPN = execute(.openVPNBinds, subsystem: "Security")
+        async let sshConfig = execute(.sshEffectiveConfig, subsystem: "Security")
+        async let authLog = execute(.sshAuthLog24h, subsystem: "Security")
+
+        let values = await (freshListeners, allWireGuard, openVPN, sshConfig, authLog)
+        let parsedListeners = SSParser.parse(values.0.stdout)
+        let cleanPort = Int(wireGuard.listenPort)
+        let classified = SecurityAuditParser.classifyListeners(
+            parsedListeners,
+            host: settings.host,
+            cleanWireGuardPort: cleanPort,
+            wireGuardAll: values.1.stdout,
+            openVPNBinds: values.2.stdout
+        )
+        let ssh = SecurityAuditParser.parseSSHConfig(
+            values.3.stdout,
+            configuredPort: settings.port,
+            authLog: values.4.stdout
+        )
+
+        let listenerState: HealthState
+        if classified.public.contains(where: { $0.state == .critical }) {
+            listenerState = .critical
+        } else if classified.public.contains(where: { $0.state == .warning }) {
+            listenerState = .warning
+        } else {
+            listenerState = .online
+        }
+
+        let state: HealthState
+        if listenerState == .critical || ssh.state == .critical {
+            state = .critical
+        } else if listenerState == .warning || ssh.state == .warning {
+            state = .warning
+        } else if !parsedListeners.isEmpty || ssh.available {
+            state = .online
+        } else {
+            state = .unknown
+        }
+
+        listeners = parsedListeners
+        security = SecuritySnapshot(
+            state: state,
+            publicListeners: classified.public,
+            privateListeners: classified.private,
+            ssh: ssh,
+            lastUpdated: Date()
+        )
     }
 
     func runDNSPathTest() async {

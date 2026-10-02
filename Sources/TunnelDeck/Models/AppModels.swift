@@ -113,6 +113,44 @@ struct Listener: Identifiable, Sendable, Hashable {
     var isPublic: Bool { address == "0.0.0.0" || address == "::" || address == "[::]" || address == "*" }
 }
 
+struct SecurityListener: Identifiable, Sendable, Hashable {
+    var id: String { "\(protocolName)-\(port)-\(service)" }
+    let service: String
+    let protocolName: String
+    let port: Int
+    let addresses: [String]
+    let process: String
+    let state: HealthState
+    let note: String
+}
+
+struct SSHSecuritySnapshot: Sendable {
+    var available = false
+    var state: HealthState = .unknown
+    var port = "—"
+    var passwordAuthentication = "—"
+    var keyboardInteractiveAuthentication = "—"
+    var pubkeyAuthentication = "—"
+    var permitRootLogin = "—"
+    var permitEmptyPasswords = "—"
+    var maxAuthTries = "—"
+    var maxSessions = "—"
+    var x11Forwarding = "—"
+    var allowTCPForwarding = "—"
+    var failedLogins24h = 0
+    var successfulLogins24h = 0
+    var lastSuccessfulLogin = "—"
+    var findings: [String] = []
+}
+
+struct SecuritySnapshot: Sendable {
+    var state: HealthState = .unknown
+    var publicListeners: [SecurityListener] = []
+    var privateListeners: [SecurityListener] = []
+    var ssh = SSHSecuritySnapshot()
+    var lastUpdated: Date?
+}
+
 struct ProfileMetadata: Identifiable, Sendable, Hashable {
     var id: String { path }
     let name: String
