@@ -47,7 +47,7 @@ struct ServicesView: View {
 
 struct SecurityView: View {
     @EnvironmentObject var model: AppViewModel
-    private var publicListeners: [Listener] { model.listeners.filter(\.isPublic) }
+    private var publicListeners: [Listener] { model.listeners.filter { $0.isPublic || (!model.settings.host.isEmpty && $0.address == model.settings.host) } }
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
