@@ -108,8 +108,11 @@ struct DNSView: View {
                         }
 
                         HStack {
-                            Text(model.adGuard.available ? "v\(model.adGuard.version)" : (model.adGuard.error ?? "API not connected"))
-                                .foregroundStyle(model.adGuard.available ? .secondary : .orange)
+                            if model.adGuard.available {
+                                Text("v\(model.adGuard.version)").foregroundStyle(.secondary)
+                            } else {
+                                Text(model.adGuard.error ?? "API not connected").foregroundStyle(.orange)
+                            }
                             Spacer()
                             if let updated = model.adGuard.lastUpdated {
                                 Text("Updated \(updated.formatted(date: .omitted, time: .standard))").foregroundStyle(.secondary)
