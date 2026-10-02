@@ -32,6 +32,7 @@ final class AppViewModel: ObservableObject {
     @Published var configurationDrift: [String] = []
     @Published var restorePreview: RestorePreview?
     @Published var approvedListenerIDs = Set<String>()
+    @Published var ignoredPeerIDs = Set<String>()
     @Published var adGuard = AdGuardSnapshot()
 
     let ssh = SSHService()
@@ -212,7 +213,7 @@ final class AppViewModel: ObservableObject {
         isRunningHealthCheck = true
         defer { isRunningHealthCheck = false }
 
-        let commands: [ReadCommand] = [.hostname, .wireGuardService, .wireGuard, .wireGuardAddress, .udpListeners, .ipForward, .natRules, .pingInternet, .dnsTest, .adGuardStatus, .adGuardBinds, .antiZapretStatus, .disk, .memory, .uptime, .listeners, .firewallState, .configurationHashes]
+        let commands: [ReadCommand] = [.hostname, .wireGuardService, .wireGuard, .wireGuardAll, .wireGuardAddress, .udpListeners, .ipForward, .natRules, .pingInternet, .dnsTest, .adGuardStatus, .adGuardBinds, .antiZapretStatus, .units, .disk, .memory, .uptime, .listeners, .firewallState, .configurationHashes]
         var results: [ReadCommand: CommandResult] = [:]
         for command in commands {
             results[command] = await execute(command, subsystem: "Doctor")
@@ -236,7 +237,8 @@ final class AppViewModel: ObservableObject {
             system: freshSystem,
             wireGuard: freshWireGuard,
             host: settings.host,
-            approvedListenerIDs: approvedListenerIDs
+            approvedListenerIDs: approvedListenerIDs,
+            ignoredPeerIDs: ignoredPeerIDs
         )
         detectConfigurationDrift(results[.configurationHashes]?.stdout ?? "", storeBaseline: healthReport?.state == .online)
         if healthReport?.state == .online { lastSuccessfulHealthCheck = Date() }
@@ -251,7 +253,24 @@ final class AppViewModel: ObservableObject {
         Task { await runFullHealthCheck() }
     }
 
-    private func loadServerScopedState() { approvedListenerIDs = Set(UserDefaults.standard.stringArray(forKey: "approvedListeners-\(settings.host)") ?? []) }
+    func ignorePeer(for issue: HealthIssue) {
+        let prefix = "peer-never-"
+        guard issue.fix == "ignore-peer", issue.id.hasPrefix(prefix) else { return }
+        ignoredPeerIDs.insert(String(issue.id.dropFirst(prefix.count)))
+        UserDefaults.standard.set(Array(ignoredPeerIDs), forKey: "ignoredPeers-\(settings.host)")
+        Task { await runFullHealthCheck() }
+    }
+
+    func resetIgnoredPeers() {
+        ignoredPeerIDs.removeAll()
+        UserDefaults.standard.removeObject(forKey: "ignoredPeers-\(settings.host)")
+        Task { await runFullHealthCheck() }
+    }
+
+    private func loadServerScopedState() {
+        approvedListenerIDs = Set(UserDefaults.standard.stringArray(forKey: "approvedListeners-\(settings.host)") ?? [])
+        ignoredPeerIDs = Set(UserDefaults.standard.stringArray(forKey: "ignoredPeers-\(settings.host)") ?? [])
+    }
 
     func discoveredAdGuardBaseURL() -> String? {
         let serverIP = wireGuard.address.split(separator: "/").first.map(String.init) ?? ""

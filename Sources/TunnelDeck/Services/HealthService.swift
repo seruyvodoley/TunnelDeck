@@ -17,7 +17,7 @@ actor ActivityStore {
 }
 
 enum HealthEvaluator {
-    static func report(results: [ReadCommand: CommandResult], listeners: [Listener], system: SystemSnapshot, wireGuard: WireGuardSnapshot, host: String, approvedListenerIDs: Set<String> = []) -> HealthReport {
+    static func report(results: [ReadCommand: CommandResult], listeners: [Listener], system: SystemSnapshot, wireGuard: WireGuardSnapshot, host: String, approvedListenerIDs: Set<String> = [], ignoredPeerIDs: Set<String> = []) -> HealthReport {
         var issues: [HealthIssue] = []
         func add(_ id: String, _ title: String, _ explanation: String, _ details: String, _ state: HealthState, _ fix: String? = nil) {
             issues.append(HealthIssue(id: id, title: title, explanation: explanation, technicalDetails: SecretRedactor.redact(details), state: state, fix: fix))
@@ -63,12 +63,26 @@ enum HealthEvaluator {
             add("public-adguard-web-\(listener.id)", "AdGuard web UI is publicly exposed", "The AdGuard Home management interface is reachable on a public or wildcard address.", "\(listener.protocolName) \(listener.address):\(listener.port) \(listener.process)", .critical)
         }
 
-        let expectedPorts = Set([22, Int(wireGuard.listenPort) ?? 51820])
-        for listener in exposed
-        where !expectedPorts.contains(listener.port)
-            && listener.port != 53
-            && !listener.process.localizedCaseInsensitiveContains("AdGuardHome")
-            && !approvedListenerIDs.contains(listener.id) {
+        var expectedPorts = Set([22, Int(wireGuard.listenPort) ?? 51820])
+        expectedPorts.formUnion(wireGuardListenPorts(results[.wireGuardAll]?.stdout ?? ""))
+
+        let activeOpenVPN = SystemctlParser.parse(results[.units]?.stdout ?? "").contains {
+            $0.name.localizedCaseInsensitiveContains("openvpn-server@") && $0.activeState == "active"
+        }
+
+        var seenUnexpected = Set<String>()
+        for listener in exposed {
+            let isKnownWireGuard = expectedPorts.contains(listener.port)
+            let isKnownOpenVPN = activeOpenVPN && listener.process.localizedCaseInsensitiveContains("openvpn")
+            let isAdGuard = listener.process.localizedCaseInsensitiveContains("AdGuardHome")
+            guard !isKnownWireGuard,
+                  !isKnownOpenVPN,
+                  listener.port != 53,
+                  !isAdGuard,
+                  !approvedListenerIDs.contains(listener.id) else { continue }
+
+            let canonical = "\(listener.protocolName.lowercased())-\(listener.port)-\(listener.process.lowercased())"
+            guard seenUnexpected.insert(canonical).inserted else { continue }
             add("unexpected-\(listener.id)", "New public listener detected", "This listener is outside the confirmed baseline for this VPS.", "\(listener.protocolName) \(listener.address):\(listener.port) \(listener.process)", .warning, "approve-listener")
         }
 
@@ -80,8 +94,16 @@ enum HealthEvaluator {
         if system.memoryPercent >= 90 {
             add("ram", "Memory usage is above 90%", "Services may be killed under memory pressure.", "\(system.memoryPercent)%", .warning)
         }
-        if wireGuard.peers.contains(where: { $0.latestHandshake == nil }) {
-            add("peers", "Some peers have no handshake", "One or more configured peers have never completed a handshake.", "Check the WireGuard peer table.", .warning)
+        for peer in wireGuard.peers where peer.latestHandshake == nil && !ignoredPeerIDs.contains(peer.id) {
+            let label = peer.vpnIP == "—" ? peer.name : peer.vpnIP
+            add(
+                "peer-never-\(peer.id)",
+                "Peer \(label) has never connected",
+                "This configured WireGuard peer has never completed a handshake.",
+                "Allowed IP: \(peer.vpnIP)\nPublic key: \(peer.publicKey)",
+                .warning,
+                "ignore-peer"
+            )
         }
 
         let state: HealthState
@@ -95,6 +117,14 @@ enum HealthEvaluator {
             state = .warning
         }
         return HealthReport(date: Date(), state: state, issues: issues)
+    }
+
+    private static func wireGuardListenPorts(_ output: String) -> Set<Int> {
+        Set(output.split(separator: "\n").compactMap { rawLine in
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            guard line.hasPrefix("listening port:") else { return nil }
+            return Int(line.split(separator: ":", maxSplits: 1).last?.trimmingCharacters(in: .whitespaces) ?? "")
+        })
     }
 }
 

@@ -117,3 +117,84 @@ import Testing
     #expect(report.state == .critical)
     #expect(report.state != .offline)
 }
+
+@Test func doctorRecognizesDiscoveredVPNListeners() {
+    func result(_ stdout: String = "", ok: Bool = true) -> CommandResult {
+        CommandResult(stdout: stdout, stderr: ok ? "" : "failed", exitCode: ok ? 0 : 1, duration: 0)
+    }
+    let results: [ReadCommand: CommandResult] = [
+        .hostname: result("vps"),
+        .wireGuardService: result("active\n"),
+        .wireGuardAll: result("""
+        interface: vpn
+          listening port: 51080
+        interface: antizapret
+          listening port: 51443
+        interface: wg0
+          listening port: 51820
+        """),
+        .udpListeners: result("udp UNCONN 0 0 0.0.0.0:51820 0.0.0.0:*"),
+        .ipForward: result("1\n"),
+        .natRules: result("-A POSTROUTING -j MASQUERADE"),
+        .pingInternet: result("ok"),
+        .dnsTest: result("ok"),
+        .adGuardStatus: result("active\n"),
+        .antiZapretStatus: result("active\n"),
+        .units: result("""
+        Id=openvpn-server@antizapret-udp.service
+        ActiveState=active
+        SubState=running
+
+        Id=openvpn-server@vpn-udp.service
+        ActiveState=active
+        SubState=running
+        """)
+    ]
+    var system = SystemSnapshot()
+    system.diskPercent = 10
+    system.memoryPercent = 10
+    var wg = WireGuardSnapshot()
+    wg.address = "10.66.66.1/24"
+    wg.listenPort = "51820"
+    let listeners = [
+        Listener(protocolName: "udp", address: "0.0.0.0", port: 51080, process: ""),
+        Listener(protocolName: "udp", address: "::", port: 51080, process: ""),
+        Listener(protocolName: "udp", address: "0.0.0.0", port: 51443, process: ""),
+        Listener(protocolName: "udp", address: "0.0.0.0", port: 50080, process: "openvpn"),
+        Listener(protocolName: "udp", address: "0.0.0.0", port: 50443, process: "openvpn")
+    ]
+    let report = HealthEvaluator.report(results: results, listeners: listeners, system: system, wireGuard: wg, host: "203.0.113.10")
+    #expect(!report.issues.contains { $0.id.hasPrefix("unexpected-") })
+}
+
+@Test func doctorNamesAndCanIgnoreNeverConnectedPeer() {
+    func result(_ stdout: String = "") -> CommandResult {
+        CommandResult(stdout: stdout, stderr: "", exitCode: 0, duration: 0)
+    }
+    let results: [ReadCommand: CommandResult] = [
+        .hostname: result("vps"),
+        .wireGuardService: result("active\n"),
+        .udpListeners: result("udp UNCONN 0 0 0.0.0.0:51820 0.0.0.0:*"),
+        .ipForward: result("1\n"),
+        .natRules: result("-A POSTROUTING -j MASQUERADE"),
+        .pingInternet: result("ok"),
+        .dnsTest: result("ok"),
+        .adGuardStatus: result("active\n"),
+        .antiZapretStatus: result("active\n")
+    ]
+    var system = SystemSnapshot()
+    system.diskPercent = 10
+    system.memoryPercent = 10
+    var wg = WireGuardSnapshot()
+    wg.address = "10.66.66.1/24"
+    wg.listenPort = "51820"
+    wg.peers = [
+        WireGuardPeer(id: "peer-key", name: "Peer 4", vpnIP: "10.66.66.3/32", publicKey: "peer…key", endpoint: "—", latestHandshake: nil, receivedBytes: 0, sentBytes: 0, status: .offline)
+    ]
+
+    let report = HealthEvaluator.report(results: results, listeners: [], system: system, wireGuard: wg, host: "203.0.113.10")
+    #expect(report.issues.contains { $0.id == "peer-never-peer-key" && $0.title.contains("10.66.66.3/32") })
+
+    let ignored = HealthEvaluator.report(results: results, listeners: [], system: system, wireGuard: wg, host: "203.0.113.10", ignoredPeerIDs: ["peer-key"])
+    #expect(!ignored.issues.contains { $0.id == "peer-never-peer-key" })
+}

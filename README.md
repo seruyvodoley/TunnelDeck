@@ -1,4 +1,4 @@
-# TunnelDeck 1.2.2
+# TunnelDeck 1.2.3
 
 Native macOS control panel for a self-hosted WireGuard, AntiZapret and AdGuard Home VPS. Built with Swift, SwiftUI and the system OpenSSH client—no Electron, embedded terminal, passwords or private keys in the app bundle.
 
@@ -136,6 +136,13 @@ swift test
 ```
 
 `swift test` requires a full Xcode installation because the suite uses Swift Testing macros. The helper tests use system Python and never connect to a production server.
+
+## 1.2.3 Doctor noise reduction
+
+- Doctor discovers all active WireGuard listen ports from `wg show all` and treats them as expected VPN listeners.
+- Active OpenVPN sockets are recognized from the discovered OpenVPN services instead of being reported as unknown public listeners.
+- IPv4/IPv6 duplicates of the same unknown listener are collapsed into one warning.
+- Never-connected WireGuard peers are named by allowed IP and can be ignored for health per VPS, with a reset control in Monitoring.
 
 ## 1.2.2 functional-correctness fixes
 

@@ -13,6 +13,7 @@ enum ReadCommand: String, CaseIterable, Sendable {
     case publicIPv4 = "curl -4 -fsS --max-time 4 https://api.ipify.org"
     case publicIPv6 = "curl -6 -fsS --max-time 4 https://api64.ipify.org"
     case wireGuard = "wg show wg0"
+    case wireGuardAll = "wg show all"
     case wireGuardAddress = "ip -brief address show wg0"
     case wireGuardLink = "ip -details link show wg0"
     case units = "systemctl show antizapret.service antizapret-update.service antizapret-update.timer wg-quick@antizapret.service wg-quick@vpn.service openvpn-server@antizapret-udp.service openvpn-server@vpn-udp.service AdGuardHome.service --property=Id,ActiveState,SubState --no-pager"
