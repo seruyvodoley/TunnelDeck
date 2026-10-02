@@ -6,7 +6,8 @@ let package = Package(
     platforms: [.macOS(.v14)],
     products: [.executable(name: "TunnelDeck", targets: ["TunnelDeck"])],
     targets: [
-        .executableTarget(name: "TunnelDeck", exclude: ["Resources/Info.plist"]),
+        .systemLibrary(name: "CSQLite", path: "Sources/CSQLite"),
+        .executableTarget(name: "TunnelDeck", dependencies: ["CSQLite"], exclude: ["Resources/Info.plist"]),
         .testTarget(name: "TunnelDeckTests", dependencies: ["TunnelDeck"])
     ]
 )
