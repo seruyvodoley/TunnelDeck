@@ -43,6 +43,7 @@ final class AppViewModel: ObservableObject {
     @Published var monitoringWindowHours = 6
     @Published var fleetSummaries: [FleetNodeSummary] = []
     @Published var incidents: [Incident] = []
+    @Published var exposureEndpoints: [NetworkEndpoint] = []
 
     let ssh = SSHService()
     let adGuardAPI = AdGuardAPIService()
@@ -354,8 +355,9 @@ final class AppViewModel: ObservableObject {
         async let openVPN = execute(.openVPNBinds, subsystem: "Security")
         async let sshConfig = execute(.sshEffectiveConfig, subsystem: "Security")
         async let authLog = execute(.sshAuthLog24h, subsystem: "Security")
+        async let firewall = execute(.firewallState, subsystem: "Security")
 
-        let values = await (freshListeners, allWireGuard, openVPN, sshConfig, authLog)
+        let values = await (freshListeners, allWireGuard, openVPN, sshConfig, authLog, firewall)
         let parsedListeners = SSParser.parse(values.0.stdout)
         let cleanPort = Int(wireGuard.listenPort)
         let classified = SecurityAuditParser.classifyListeners(
@@ -399,6 +401,11 @@ final class AppViewModel: ObservableObject {
             ssh: ssh,
             lastUpdated: Date()
         )
+        if let nodeID = activeServerID {
+            var names = SecurityAuditParser.wireGuardPorts(values.1.stdout).mapValues { value in value == "wg0" ? "Clean WireGuard" : value.localizedCaseInsensitiveContains("antizapret") ? "AntiZapret WireGuard" : "Full VPN WireGuard" }
+            for (port, profile) in SecurityAuditParser.openVPNPorts(values.2.stdout) { names[port] = profile.localizedCaseInsensitiveContains("antizapret") ? "AntiZapret OpenVPN" : "Full VPN OpenVPN" }
+            exposureEndpoints = ExposureAnalyzer.analyze(listeners: parsedListeners, nodeID: nodeID, publicAddresses: Set([settings.host, system.publicIPv4, system.publicIPv6].filter { !$0.isEmpty && $0 != "—" }), vpnAddresses: Set([wireGuard.address.split(separator: "/").first.map(String.init) ?? ""].filter { !$0.isEmpty }), firewallEvidence: values.5.stdout, serviceNames: names)
+        } else { exposureEndpoints = [] }
         updateFleet()
     }
 
@@ -556,6 +563,7 @@ final class AppViewModel: ObservableObject {
 
     var activeNodeName: String { servers.first(where: { $0.id == activeServerID })?.name ?? (system.hostname == "—" ? "VPS" : system.hostname) }
     func updateFleet() { fleetSummaries = fleetController.summaries(profiles: servers, activeID: activeServerID, system: system, wireGuard: wireGuard, units: units, security: security, incidents: incidents) }
+    func exposureName(_ endpoint: NetworkEndpoint) -> String { ExposureAnalyzer.displayName(endpoint, listeners: listeners) }
 
     func testSSH() async -> Bool {
         let result = await execute(.uname, subsystem: "SSH Test")
@@ -605,10 +613,10 @@ final class AppViewModel: ObservableObject {
 }
 
 enum SidebarSection: String, CaseIterable, Identifiable {
-    case fleet = "Fleet Overview", topology = "Topology", dashboard = "Node Dashboard", incidents = "Incidents", doctor = "Doctor", monitoring = "Monitoring", wireGuard = "WireGuard", profiles = "Profiles", dns = "DNS & AdGuard", antiZapret = "AntiZapret", services = "Services", diagnostics = "Diagnostics", security = "Security", backups = "Backups", activity = "Activity", recovery = "Recovery", router = "Router", homeAccess = "Home Access", logs = "Logs", settings = "Settings"
+    case fleet = "Fleet Overview", topology = "Topology", dashboard = "Node Dashboard", incidents = "Incidents", exposure = "Exposure", doctor = "Doctor", monitoring = "Monitoring", wireGuard = "WireGuard", profiles = "Profiles", dns = "DNS & AdGuard", antiZapret = "AntiZapret", services = "Services", diagnostics = "Diagnostics", security = "Security", backups = "Backups", activity = "Activity", recovery = "Recovery", router = "Router", homeAccess = "Home Access", logs = "Logs", settings = "Settings"
     var id: String { rawValue }
     var icon: String {
-        switch self { case .fleet: "server.rack"; case .topology: "point.3.connected.trianglepath.dotted"; case .dashboard: "gauge"; case .incidents: "exclamationmark.triangle"; case .doctor: "cross.case"; case .monitoring: "waveform.path.ecg"; case .wireGuard: "network"; case .profiles: "doc.text"; case .antiZapret: "shield.lefthalf.filled"; case .dns: "server.rack"; case .services: "gearshape.2"; case .diagnostics: "stethoscope"; case .security: "lock.shield"; case .backups: "externaldrive.badge.timemachine"; case .activity: "clock.arrow.circlepath"; case .recovery: "lifepreserver"; case .router: "wifi.router"; case .homeAccess: "house"; case .logs: "list.bullet.rectangle"; case .settings: "gear" }
+        switch self { case .fleet: "server.rack"; case .topology: "point.3.connected.trianglepath.dotted"; case .dashboard: "gauge"; case .incidents: "exclamationmark.triangle"; case .exposure: "network.badge.shield.half.filled"; case .doctor: "cross.case"; case .monitoring: "waveform.path.ecg"; case .wireGuard: "network"; case .profiles: "doc.text"; case .antiZapret: "shield.lefthalf.filled"; case .dns: "server.rack"; case .services: "gearshape.2"; case .diagnostics: "stethoscope"; case .security: "lock.shield"; case .backups: "externaldrive.badge.timemachine"; case .activity: "clock.arrow.circlepath"; case .recovery: "lifepreserver"; case .router: "wifi.router"; case .homeAccess: "house"; case .logs: "list.bullet.rectangle"; case .settings: "gear" }
     }
 }
 

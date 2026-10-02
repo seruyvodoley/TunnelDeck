@@ -16,6 +16,7 @@ struct ContentView: View {
         case .topology: TopologyView()
         case .dashboard: DashboardView()
         case .incidents: IncidentView()
+        case .exposure: ExposureView()
         case .doctor: DoctorView()
         case .monitoring: MonitoringView()
         case .wireGuard: WireGuardView()
