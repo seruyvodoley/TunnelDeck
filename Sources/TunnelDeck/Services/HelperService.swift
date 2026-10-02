@@ -9,7 +9,7 @@ struct HelperPeerChange: Codable, Sendable { let name: String?; let ip: String?;
 struct HelperServiceChange: Codable, Sendable { let unit: String; let action: String; let state: String; let backup: String }
 
 actor HelperService {
-    static let localVersion = "1.2.0"
+    static let localVersion = "1.2.1"
     private let ssh: SSHService
     init(ssh: SSHService) { self.ssh = ssh }
 
