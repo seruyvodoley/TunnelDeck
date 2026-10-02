@@ -14,7 +14,7 @@ final class AppViewModel: ObservableObject {
     @Published var diagnostics: [DiagnosticResult] = []
     @Published var isRefreshing = false
     @Published var lastRefresh: Date?
-    @Published var selectedSection: SidebarSection = .dashboard
+    @Published var selectedSection: SidebarSection = .fleet
     @Published var showOnboarding: Bool
     @Published var statusMessage = "Read-only mode"
     @Published var helperVersion: String?
@@ -41,6 +41,8 @@ final class AppViewModel: ObservableObject {
     @Published var monitoringSamples: [MonitoringSample] = []
     @Published var monitoringEvents: [MonitoringEvent] = []
     @Published var monitoringWindowHours = 6
+    @Published var fleetSummaries: [FleetNodeSummary] = []
+    @Published var incidents: [Incident] = []
 
     let ssh = SSHService()
     let adGuardAPI = AdGuardAPIService()
@@ -49,6 +51,7 @@ final class AppViewModel: ObservableObject {
     private let history = DiagnosticHistoryStore()
     private let activityStore = ActivityStore()
     private let monitoringStore = MonitoringHistoryStore()
+    private let fleetController = FleetController()
     private var pollTask: Task<Void, Never>?
     private var previousCPUTicks: (idle: Double, total: Double)?
 
@@ -66,6 +69,7 @@ final class AppViewModel: ObservableObject {
         if let data = UserDefaults.standard.data(forKey: "servers") { servers = (try? JSONDecoder().decode([ServerProfile].self, from: data)) ?? [] }
         activeServerID = UserDefaults.standard.string(forKey: "activeServerID").flatMap(UUID.init)
         loadServerScopedState()
+        updateFleet()
     }
 
     var configuration: SSHConfiguration { SSHConfiguration(host: settings.host, username: settings.username, keyPath: NSString(string: settings.keyPath).expandingTildeInPath, timeout: 8, port: settings.port) }
@@ -82,6 +86,7 @@ final class AppViewModel: ObservableObject {
         servers.removeAll { $0.id == profile.id }; servers.append(profile); activeServerID = profile.id
         if let data = try? JSONEncoder().encode(servers) { UserDefaults.standard.set(data, forKey: "servers") }
         UserDefaults.standard.set(profile.id.uuidString, forKey: "activeServerID"); saveSettings()
+        updateFleet()
     }
 
     func selectServer(_ id: UUID) {
@@ -89,6 +94,7 @@ final class AppViewModel: ObservableObject {
         activeServerID = id; UserDefaults.standard.set(id.uuidString, forKey: "activeServerID"); settings.host = server.host; settings.port = server.port; settings.username = server.username; settings.keyPath = server.keyPath
         system = SystemSnapshot(); wireGuard = WireGuardSnapshot(); units = []; listeners = []; healthReport = nil; security = SecuritySnapshot(); monitoringSamples = []; monitoringEvents = []; loadServerScopedState()
         saveSettings(); Task { await loadMonitoringHistory(); await refresh() }
+        updateFleet()
     }
 
     func completeOnboarding() { settings.completedOnboarding = true; showOnboarding = false; saveSettings() }
@@ -150,7 +156,7 @@ final class AppViewModel: ObservableObject {
             let pair = line.split(separator: "=", maxSplits: 1).map(String.init); return pair.count == 2 ? (pair[0], pair[1]) : nil
         })
         profiles = ProfileParser.parseListing(values.14.stdout)
-        lastRefresh = Date(); statusMessage = values.0.succeeded ? "Updated" : "SSH unavailable"
+        lastRefresh = Date(); statusMessage = values.0.succeeded ? "Updated" : "SSH unavailable"; updateFleet()
         if values.0.succeeded { await refreshHelper() }
         await recordMonitoringState()
         await performScheduledBackupIfNeeded()
@@ -393,6 +399,7 @@ final class AppViewModel: ObservableObject {
             ssh: ssh,
             lastUpdated: Date()
         )
+        updateFleet()
     }
 
     func runDNSPathTest() async {
@@ -543,6 +550,9 @@ final class AppViewModel: ObservableObject {
         return unit.activeState == "active" ? .online : .offline
     }
 
+    var activeNodeName: String { servers.first(where: { $0.id == activeServerID })?.name ?? (system.hostname == "—" ? "VPS" : system.hostname) }
+    func updateFleet() { fleetSummaries = fleetController.summaries(profiles: servers, activeID: activeServerID, system: system, wireGuard: wireGuard, units: units, security: security, incidents: incidents) }
+
     func testSSH() async -> Bool {
         let result = await execute(.uname, subsystem: "SSH Test")
         statusMessage = result.succeeded ? "SSH connection successful" : "SSH failed: \(result.stderr)"
@@ -591,10 +601,10 @@ final class AppViewModel: ObservableObject {
 }
 
 enum SidebarSection: String, CaseIterable, Identifiable {
-    case dashboard = "Dashboard", doctor = "Doctor", monitoring = "Monitoring", wireGuard = "WireGuard", profiles = "Profiles", dns = "DNS & AdGuard", antiZapret = "AntiZapret", services = "Services", diagnostics = "Diagnostics", security = "Security", backups = "Backups", activity = "Activity", recovery = "Recovery", router = "Router", homeAccess = "Home Access", logs = "Logs", settings = "Settings"
+    case fleet = "Fleet Overview", topology = "Topology", dashboard = "Node Dashboard", doctor = "Doctor", monitoring = "Monitoring", wireGuard = "WireGuard", profiles = "Profiles", dns = "DNS & AdGuard", antiZapret = "AntiZapret", services = "Services", diagnostics = "Diagnostics", security = "Security", backups = "Backups", activity = "Activity", recovery = "Recovery", router = "Router", homeAccess = "Home Access", logs = "Logs", settings = "Settings"
     var id: String { rawValue }
     var icon: String {
-        switch self { case .dashboard: "gauge"; case .doctor: "cross.case"; case .monitoring: "waveform.path.ecg"; case .wireGuard: "network"; case .profiles: "doc.text"; case .antiZapret: "shield.lefthalf.filled"; case .dns: "server.rack"; case .services: "gearshape.2"; case .diagnostics: "stethoscope"; case .security: "lock.shield"; case .backups: "externaldrive.badge.timemachine"; case .activity: "clock.arrow.circlepath"; case .recovery: "lifepreserver"; case .router: "wifi.router"; case .homeAccess: "house"; case .logs: "list.bullet.rectangle"; case .settings: "gear" }
+        switch self { case .fleet: "server.rack"; case .topology: "point.3.connected.trianglepath.dotted"; case .dashboard: "gauge"; case .doctor: "cross.case"; case .monitoring: "waveform.path.ecg"; case .wireGuard: "network"; case .profiles: "doc.text"; case .antiZapret: "shield.lefthalf.filled"; case .dns: "server.rack"; case .services: "gearshape.2"; case .diagnostics: "stethoscope"; case .security: "lock.shield"; case .backups: "externaldrive.badge.timemachine"; case .activity: "clock.arrow.circlepath"; case .recovery: "lifepreserver"; case .router: "wifi.router"; case .homeAccess: "house"; case .logs: "list.bullet.rectangle"; case .settings: "gear" }
     }
 }
 
