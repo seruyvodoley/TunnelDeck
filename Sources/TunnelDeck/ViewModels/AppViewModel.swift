@@ -129,7 +129,7 @@ final class AppViewModel: ObservableObject {
         system.sshAvailable = values.0.succeeded
         system.health = values.0.succeeded ? .online : .offline
         wireGuard = WireGuardParser.parse(values.8.stdout, timeout: settings.handshakeTimeout)
-        wireGuard.address = values.9.stdout.split(whereSeparator: \.isWhitespace).dropFirst(2).first.map(String.init) ?? "—"
+        wireGuard.address = parseWireGuardAddress(values.9.stdout)
         if let mtuRange = values.10.stdout.range(of: #"mtu\s+(\d+)"#, options: .regularExpression) { wireGuard.mtu = values.10.stdout[mtuRange].split(separator: " ").last.map(String.init) ?? "—" }
         units = SystemctlParser.parse(values.11.stdout)
         listeners = SSParser.parse(values.12.stdout)
@@ -209,12 +209,35 @@ final class AppViewModel: ObservableObject {
 
     func runFullHealthCheck() async {
         guard !isRunningHealthCheck else { return }
-        isRunningHealthCheck = true; defer { isRunningHealthCheck = false }
+        isRunningHealthCheck = true
+        defer { isRunningHealthCheck = false }
+
         let commands: [ReadCommand] = [.hostname, .wireGuardService, .wireGuard, .wireGuardAddress, .udpListeners, .ipForward, .natRules, .pingInternet, .dnsTest, .adGuardStatus, .adGuardBinds, .antiZapretStatus, .disk, .memory, .uptime, .listeners, .firewallState, .configurationHashes]
         var results: [ReadCommand: CommandResult] = [:]
-        for command in commands { results[command] = await execute(command, subsystem: "Doctor") }
+        for command in commands {
+            results[command] = await execute(command, subsystem: "Doctor")
+        }
+
+        var freshWireGuard = WireGuardParser.parse(results[.wireGuard]?.stdout ?? "", timeout: settings.handshakeTimeout)
+        freshWireGuard.address = parseWireGuardAddress(results[.wireGuardAddress]?.stdout ?? "")
+
+        var freshSystem = system
+        freshSystem.sshAvailable = results[.hostname]?.succeeded == true
+        freshSystem.health = freshSystem.sshAvailable ? .online : .offline
+        freshSystem.diskPercent = parseDisk(results[.disk]?.stdout ?? "")
+        freshSystem.memoryPercent = parseMemory(results[.memory]?.stdout ?? "")
+
+        let freshListeners = SSParser.parse(results[.listeners]?.stdout ?? "")
+
         loadServerScopedState()
-        healthReport = HealthEvaluator.report(results: results, listeners: listeners, system: system, wireGuard: wireGuard, host: settings.host, approvedListenerIDs: approvedListenerIDs)
+        healthReport = HealthEvaluator.report(
+            results: results,
+            listeners: freshListeners,
+            system: freshSystem,
+            wireGuard: freshWireGuard,
+            host: settings.host,
+            approvedListenerIDs: approvedListenerIDs
+        )
         detectConfigurationDrift(results[.configurationHashes]?.stdout ?? "", storeBaseline: healthReport?.state == .online)
         if healthReport?.state == .online { lastSuccessfulHealthCheck = Date() }
         await activityStore.append(operation: "Full Health Check", server: settings.host, preview: "\(commands.count) read-only checks", result: healthReport?.state.rawValue ?? "unknown")
@@ -230,17 +253,57 @@ final class AppViewModel: ObservableObject {
 
     private func loadServerScopedState() { approvedListenerIDs = Set(UserDefaults.standard.stringArray(forKey: "approvedListeners-\(settings.host)") ?? []) }
 
-    func saveAdGuardCredentials(baseURL: String, username: String, password: String) async {
-        do { try KeychainService.save(baseURL, account: "adguard-url-\(settings.host)"); try KeychainService.save(username, account: "adguard-user-\(settings.host)"); try KeychainService.save(password, account: "adguard-password-\(settings.host)"); await refreshAdGuardAPI() }
-        catch { presentedError = AppError(title: "AdGuard credentials could not be saved", message: "Keychain rejected the credentials.", technicalDetails: error.localizedDescription, recommendedAction: "Check Keychain access and retry.") }
+    func discoveredAdGuardBaseURL() -> String? {
+        let serverIP = wireGuard.address.split(separator: "/").first.map(String.init) ?? ""
+        guard !serverIP.isEmpty, serverIP != "—" else { return nil }
+
+        let candidates = listeners.filter {
+            $0.protocolName.lowercased().hasPrefix("tcp")
+                && $0.port != 53
+                && $0.process.localizedCaseInsensitiveContains("AdGuardHome")
+        }
+        guard let listener = candidates.first(where: { $0.address == serverIP })
+            ?? candidates.first(where: { $0.isPublic || $0.address == settings.host })
+            ?? candidates.first else { return nil }
+
+        let scheme = listener.port == 443 ? "https" : "http"
+        let isDefaultPort = (scheme == "http" && listener.port == 80) || (scheme == "https" && listener.port == 443)
+        return "\(scheme)://\(serverIP)\(isDefaultPort ? "" : ":\(listener.port)")"
+    }
+
+    func saveAdGuardCredentials(baseURL: String, username: String, password: String) async -> Bool {
+        let candidate = await adGuardAPI.load(baseURL: baseURL, username: username, password: password)
+        guard candidate.available else {
+            adGuard = candidate
+            presentedError = AppError(
+                title: "AdGuard login failed",
+                message: candidate.error ?? "TunnelDeck could not authenticate to AdGuard Home.",
+                technicalDetails: "Endpoint: \(baseURL)",
+                recommendedAction: "Verify the discovered AdGuard URL and credentials. HTTP 401 means the credentials were rejected; connection errors mean the endpoint is not reachable."
+            )
+            return false
+        }
+
+        do {
+            try KeychainService.save(baseURL, account: "adguard-url-\(settings.host)")
+            try KeychainService.save(username, account: "adguard-user-\(settings.host)")
+            try KeychainService.save(password, account: "adguard-password-\(settings.host)")
+            adGuard = candidate
+            return true
+        } catch {
+            presentedError = AppError(title: "AdGuard credentials could not be saved", message: "Keychain rejected the credentials.", technicalDetails: error.localizedDescription, recommendedAction: "Check Keychain access and retry.")
+            return false
+        }
     }
 
     func refreshAdGuardAPI() async {
-        let serverIP = wireGuard.address.split(separator: "/").first.map(String.init) ?? ""
-        let baseURL = KeychainService.load(account: "adguard-url-\(settings.host)") ?? "http://\(serverIP):3000"
+        let baseURL = KeychainService.load(account: "adguard-url-\(settings.host)") ?? discoveredAdGuardBaseURL() ?? ""
         let username = KeychainService.load(account: "adguard-user-\(settings.host)") ?? ""
         let password = KeychainService.load(account: "adguard-password-\(settings.host)") ?? ""
-        guard !serverIP.isEmpty, !username.isEmpty, !password.isEmpty else { adGuard.error = "AdGuard API credentials are not configured"; return }
+        guard !baseURL.isEmpty, !username.isEmpty, !password.isEmpty else {
+            adGuard.error = "AdGuard API credentials are not configured"
+            return
+        }
         adGuard = await adGuardAPI.load(baseURL: baseURL, username: username, password: password)
     }
 
@@ -350,6 +413,12 @@ final class AppViewModel: ObservableObject {
             logs.insert(LogEntry(timestamp: Date(), subsystem: subsystem, command: command.rawValue, stdout: "", stderr: message, exitCode: -1), at: 0)
             return CommandResult(stdout: "", stderr: message, exitCode: -1, duration: 0)
         }
+    }
+
+    private func parseWireGuardAddress(_ value: String) -> String {
+        let fields = value.split(whereSeparator: \.isWhitespace)
+        guard fields.count >= 3 else { return "—" }
+        return String(fields[2])
     }
 
     private func parseOS(_ value: String) -> String { value.split(separator: "\n").first(where: { $0.hasPrefix("PRETTY_NAME=") }).map { $0.replacingOccurrences(of: "PRETTY_NAME=", with: "").replacingOccurrences(of: "\"", with: "") } ?? "—" }
