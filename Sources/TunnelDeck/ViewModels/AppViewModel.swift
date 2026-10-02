@@ -359,9 +359,9 @@ final class AppViewModel: ObservableObject {
         )
 
         let listenerState: HealthState
-        if classified.public.contains(where: { $0.state == .critical }) {
+        if classified.publicItems.contains(where: { $0.state == .critical }) {
             listenerState = .critical
-        } else if classified.public.contains(where: { $0.state == .warning }) {
+        } else if classified.publicItems.contains(where: { $0.state == .warning }) {
             listenerState = .warning
         } else {
             listenerState = .online
@@ -381,8 +381,8 @@ final class AppViewModel: ObservableObject {
         listeners = parsedListeners
         security = SecuritySnapshot(
             state: state,
-            publicListeners: classified.public,
-            privateListeners: classified.private,
+            publicListeners: classified.publicItems,
+            privateListeners: classified.privateItems,
             ssh: ssh,
             lastUpdated: Date()
         )
