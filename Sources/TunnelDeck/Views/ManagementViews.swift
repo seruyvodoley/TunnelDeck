@@ -76,7 +76,7 @@ struct SettingsView: View {
                     do { try LaunchAtLoginService.setEnabled(value); model.settings.launchAtLogin = value; model.saveSettings() }
                     catch { model.presentedError = AppError(title: "Launch at Login failed", message: "macOS could not update the login-item setting.", technicalDetails: error.localizedDescription, recommendedAction: "Open System Settings → General → Login Items and verify permission.") }
                 }))
-                Toggle("State-change notifications", isOn: $model.settings.notificationsEnabled)
+                Toggle("State-change notifications", isOn: $model.settings.notificationsEnabled).onChange(of: model.settings.notificationsEnabled) { _, enabled in if enabled { NotificationService.request() } }
             }
             Button("Save") { model.saveSettings() }
         }.formStyle(.grouped).padding()
