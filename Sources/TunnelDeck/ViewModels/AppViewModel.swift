@@ -38,6 +38,8 @@ final class AppViewModel: ObservableObject {
     @Published var isRunningDNSPathTest = false
     @Published var security = SecuritySnapshot()
     @Published var isRefreshingSecurity = false
+    @Published var monitoringSamples: [MonitoringSample] = []
+    @Published var monitoringEvents: [MonitoringEvent] = []
 
     let ssh = SSHService()
     let adGuardAPI = AdGuardAPIService()
@@ -45,6 +47,7 @@ final class AppViewModel: ObservableObject {
     lazy var helper = HelperService(ssh: ssh)
     private let history = DiagnosticHistoryStore()
     private let activityStore = ActivityStore()
+    private let monitoringStore = MonitoringHistoryStore()
     private var pollTask: Task<Void, Never>?
     private var previousCPUTicks: (idle: Double, total: Double)?
 
@@ -58,6 +61,7 @@ final class AppViewModel: ObservableObject {
         localProfiles = ProfileStore.list()
         Task { diagnostics = await history.load() }
         Task { activity = await activityStore.load() }
+        Task { await loadMonitoringHistory() }
         if let data = UserDefaults.standard.data(forKey: "servers") { servers = (try? JSONDecoder().decode([ServerProfile].self, from: data)) ?? [] }
         activeServerID = UserDefaults.standard.string(forKey: "activeServerID").flatMap(UUID.init)
         loadServerScopedState()
@@ -82,8 +86,8 @@ final class AppViewModel: ObservableObject {
     func selectServer(_ id: UUID) {
         guard let server = servers.first(where: { $0.id == id }) else { return }
         activeServerID = id; UserDefaults.standard.set(id.uuidString, forKey: "activeServerID"); settings.host = server.host; settings.port = server.port; settings.username = server.username; settings.keyPath = server.keyPath
-        system = SystemSnapshot(); wireGuard = WireGuardSnapshot(); units = []; listeners = []; healthReport = nil; security = SecuritySnapshot(); loadServerScopedState()
-        saveSettings(); Task { await refresh() }
+        system = SystemSnapshot(); wireGuard = WireGuardSnapshot(); units = []; listeners = []; healthReport = nil; security = SecuritySnapshot(); monitoringSamples = []; monitoringEvents = []; loadServerScopedState()
+        saveSettings(); Task { await loadMonitoringHistory(); await refresh() }
     }
 
     func completeOnboarding() { settings.completedOnboarding = true; showOnboarding = false; saveSettings() }
@@ -120,7 +124,8 @@ final class AppViewModel: ObservableObject {
         async let socketListeners = execute(.listeners, subsystem: "DNS")
         async let azSettings = execute(.antiZapretSettings, subsystem: "AntiZapret")
         async let profileList = execute(.profiles, subsystem: "Profiles")
-        let values = await (hostname, os, uname, uptime, memory, disk, ipv4, ipv6, wg, wgAddress, wgLink, serviceUnits, socketListeners, azSettings, profileList, cpu, macPublicIP)
+        async let monitoringPing = execute(.monitoringPing, subsystem: "Monitoring")
+        let values = await (hostname, os, uname, uptime, memory, disk, ipv4, ipv6, wg, wgAddress, wgLink, serviceUnits, socketListeners, azSettings, profileList, cpu, macPublicIP, monitoringPing)
         system.hostname = values.0.stdout.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty ?? "—"
         system.osVersion = parseOS(values.1.stdout)
         system.kernel = values.2.stdout.split(separator: " ").dropFirst(2).first.map(String.init) ?? "—"
@@ -132,6 +137,7 @@ final class AppViewModel: ObservableObject {
         system.publicIPv6 = values.7.stdout.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty ?? "—"
         system.cpuPercent = parseCPU(values.15.stdout)
         system.macPublicIP = values.16
+        system.pingMilliseconds = MonitoringMetricParser.pingMilliseconds(values.17.stdout)
         system.sshAvailable = values.0.succeeded
         system.health = values.0.succeeded ? .online : .offline
         wireGuard = WireGuardParser.parse(values.8.stdout, timeout: settings.handshakeTimeout)
@@ -145,7 +151,7 @@ final class AppViewModel: ObservableObject {
         profiles = ProfileParser.parseListing(values.14.stdout)
         lastRefresh = Date(); statusMessage = values.0.succeeded ? "Updated" : "SSH unavailable"
         if values.0.succeeded { await refreshHelper() }
-        await evaluateMonitoringState()
+        await recordMonitoringState()
         await performScheduledBackupIfNeeded()
     }
 
@@ -487,14 +493,53 @@ final class AppViewModel: ObservableObject {
         if Date().timeIntervalSince(last) >= 86_400 { _ = await createBackup() }
     }
 
-    private func evaluateMonitoringState() async {
-        let current = ["vps": system.health.rawValue, "wg0": wireGuard.state.rawValue, "adguard": units.first { $0.name.contains("AdGuardHome") }?.activeState ?? "unknown", "antizapret": units.first { $0.name == "antizapret.service" }?.activeState ?? "unknown", "dnsPublic": String(listeners.contains { ($0.isPublic || $0.address == settings.host) && $0.port == 53 }), "diskCritical": String(system.diskPercent >= 90)]
-        let stateKey = "monitoringState-\(settings.host)"
-        let previous = UserDefaults.standard.dictionary(forKey: stateKey) as? [String: String] ?? [:]
+    func loadMonitoringHistory() async {
+        monitoringSamples = await monitoringStore.loadSamples(host: settings.host)
+        monitoringEvents = await monitoringStore.loadEvents(host: settings.host)
+    }
+
+    private func recordMonitoringState() async {
+        let adGuardState = monitoredUnitState { $0.name.contains("AdGuardHome") }
+        let antiZapretState = monitoredUnitState { $0.name == "antizapret.service" }
+        let exposedDNS = listeners.contains { ($0.isPublic || $0.address == settings.host) && $0.port == 53 }
+        let publicListeners = Array(Set(listeners
+            .filter { $0.isPublic || (!settings.host.isEmpty && $0.address == settings.host) }
+            .map { "\($0.protocolName.lowercased()):\($0.port)" })).sorted()
+
+        let sample = MonitoringSample(
+            id: UUID(),
+            timestamp: Date(),
+            cpuPercent: system.cpuPercent,
+            memoryPercent: system.memoryPercent,
+            diskPercent: system.diskPercent,
+            pingMilliseconds: system.pingMilliseconds,
+            vpsState: system.health,
+            wireGuardState: wireGuard.state,
+            adGuardState: adGuardState,
+            antiZapretState: antiZapretState,
+            publicDNSExposed: exposedDNS,
+            publicListeners: publicListeners
+        )
+
+        let result = await monitoringStore.record(host: settings.host, sample: sample)
+        monitoringSamples = result.samples
+        monitoringEvents = result.events
+
         if settings.notificationsEnabled {
-            for (key, value) in current where previous[key] != nil && previous[key] != value { NotificationService.send(title: "TunnelDeck state changed", body: "\(key): \(previous[key]!) → \(value)", id: "tunneldeck-\(key)-\(value)") }
+            for event in result.newEvents {
+                NotificationService.send(
+                    title: event.title,
+                    body: event.detail,
+                    id: "tunneldeck-\(settings.host)-\(event.component)-\(event.state.rawValue)"
+                )
+            }
         }
-        UserDefaults.standard.set(current, forKey: stateKey)
+    }
+
+    private func monitoredUnitState(where predicate: (UnitStatus) -> Bool) -> HealthState {
+        guard system.health == .online else { return .unknown }
+        guard let unit = units.first(where: predicate) else { return .unknown }
+        return unit.activeState == "active" ? .online : .offline
     }
 
     func testSSH() async -> Bool {

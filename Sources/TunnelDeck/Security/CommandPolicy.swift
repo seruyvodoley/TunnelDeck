@@ -22,6 +22,7 @@ enum ReadCommand: String, CaseIterable, Sendable {
     case antiZapretFiles = "find /root/antizapret/result -maxdepth 2 -type f -printf '%p|%s|%TY-%Tm-%TdT%TH:%TM:%TS\\n'"
     case profiles = "find /root /root/antizapret/client -type f \\( -name '*.conf' -o -name '*.ovpn' \\) -printf '%p|%s|%TY-%Tm-%TdT%TH:%TM:%TS\\n'"
     case pingInternet = "ping -c 3 -W 2 1.1.1.1"
+    case monitoringPing = "ping -c 1 -W 2 1.1.1.1"
     case dnsTest = "getent ahostsv4 example.com"
     case iperfDetection = "command -v iperf3"
     case recentAntiZapretLogs = "journalctl -u antizapret.service -n 200 --no-pager -o short-iso"

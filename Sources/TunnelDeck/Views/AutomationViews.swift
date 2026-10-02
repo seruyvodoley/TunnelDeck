@@ -1,4 +1,5 @@
 import SwiftUI
+import Charts
 
 struct DoctorView: View {
     @EnvironmentObject var model: AppViewModel
@@ -15,21 +16,179 @@ struct DoctorView: View {
 
 struct MonitoringView: View {
     @EnvironmentObject var model: AppViewModel
-    var body: some View { Form {
-        Section("Background monitoring") { Toggle("Enable polling", isOn: $model.settings.pollingEnabled); HStack { Text("Interval"); Slider(value: $model.settings.pollingInterval, in: 5...300, step: 5); Text("\(Int(model.settings.pollingInterval)) s") }; Toggle("Notify only on state changes", isOn: $model.settings.notificationsEnabled).onChange(of: model.settings.notificationsEnabled) { _, enabled in if enabled { NotificationService.request() } }; Button("Save Monitoring Settings") { model.saveSettings() } }
-        Section("Current state") { KeyValueRow(key: "VPS", value: model.system.health.rawValue); KeyValueRow(key: "wg0", value: model.wireGuard.state.rawValue); KeyValueRow(key: "Disk", value: "\(Int(model.system.diskPercent))%"); KeyValueRow(key: "Public DNS", value: model.listeners.contains { ($0.isPublic || $0.address == model.settings.host) && $0.port == 53 } ? "Exposed" : "Not detected") }
-        Section("Peer inactivity") {
-            Text("Peers are marked offline after \(Int(model.settings.handshakeTimeout)) seconds without a handshake. Configure the threshold in Settings.").foregroundStyle(.secondary)
-            if !model.ignoredPeerIDs.isEmpty {
-                HStack {
-                    Text("Ignored by Doctor")
-                    Spacer()
-                    Text("\(model.ignoredPeerIDs.count)").foregroundStyle(.secondary)
-                    Button("Reset") { model.resetIgnoredPeers() }
+    @State private var windowHours = 6
+
+    private var filteredSamples: [MonitoringSample] {
+        let cutoff = Date().addingTimeInterval(-Double(windowHours) * 3600)
+        return model.monitoringSamples.filter { $0.timestamp >= cutoff }
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                MetricCard(title: "Background monitoring", icon: "waveform.path.ecg") {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Toggle("Enable polling", isOn: $model.settings.pollingEnabled)
+                        HStack {
+                            Text("Interval")
+                            Slider(value: $model.settings.pollingInterval, in: 5...300, step: 5)
+                            Text("\(Int(model.settings.pollingInterval)) s").monospacedDigit()
+                        }
+                        Toggle("State-change notifications", isOn: $model.settings.notificationsEnabled)
+                            .onChange(of: model.settings.notificationsEnabled) { _, enabled in
+                                if enabled { NotificationService.request() }
+                            }
+                        HStack {
+                            Button("Save Monitoring Settings") { model.saveSettings() }
+                            Button("Reload History") { Task { await model.loadMonitoringHistory() } }
+                            Spacer()
+                            Text("History is stored locally on this Mac.").foregroundStyle(.secondary)
+                        }
+                    }
+                }
+
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 210), spacing: 12)], spacing: 12) {
+                    serviceCard("VPS", component: "vps", state: model.system.health)
+                    serviceCard("WireGuard wg0", component: "wg0", state: model.wireGuard.state)
+                    serviceCard("AdGuard", component: "adguard", state: latestSample?.adGuardState ?? .unknown)
+                    serviceCard("AntiZapret", component: "antizapret", state: latestSample?.antiZapretState ?? .unknown)
+                }
+
+                MetricCard(title: "History", icon: "chart.xyaxis.line") {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Picker("Window", selection: $windowHours) {
+                            Text("1 hour").tag(1)
+                            Text("6 hours").tag(6)
+                            Text("24 hours").tag(24)
+                        }
+                        .pickerStyle(.segmented)
+                        .frame(maxWidth: 420)
+
+                        if filteredSamples.isEmpty {
+                            Text("No samples in this window yet. Keep polling enabled to build history.")
+                                .foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity, minHeight: 160, alignment: .center)
+                        } else {
+                            HStack(spacing: 24) {
+                                averageMetric("CPU avg", filteredSamples.map(\.cpuPercent))
+                                averageMetric("RAM avg", filteredSamples.map(\.memoryPercent))
+                                averageMetric("Disk avg", filteredSamples.map(\.diskPercent))
+                                averageMetric("Ping avg", filteredSamples.compactMap(\.pingMilliseconds), suffix: " ms")
+                            }
+
+                            Chart(filteredSamples) { sample in
+                                LineMark(x: .value("Time", sample.timestamp), y: .value("Percent", sample.cpuPercent))
+                                    .foregroundStyle(by: .value("Metric", "CPU"))
+                                LineMark(x: .value("Time", sample.timestamp), y: .value("Percent", sample.memoryPercent))
+                                    .foregroundStyle(by: .value("Metric", "RAM"))
+                                LineMark(x: .value("Time", sample.timestamp), y: .value("Percent", sample.diskPercent))
+                                    .foregroundStyle(by: .value("Metric", "Disk"))
+                            }
+                            .chartYScale(domain: 0...100)
+                            .chartLegend(position: .bottom)
+                            .frame(height: 230)
+
+                            let pingSamples = filteredSamples.filter { $0.pingMilliseconds != nil }
+                            if !pingSamples.isEmpty {
+                                Text("VPS internet latency").font(.headline)
+                                Chart(pingSamples) { sample in
+                                    LineMark(
+                                        x: .value("Time", sample.timestamp),
+                                        y: .value("Ping", sample.pingMilliseconds ?? 0)
+                                    )
+                                }
+                                .frame(height: 150)
+                            }
+                        }
+                    }
+                }
+
+                MetricCard(title: "Event log", icon: "clock.arrow.circlepath") {
+                    VStack(alignment: .leading, spacing: 10) {
+                        if model.monitoringEvents.isEmpty {
+                            Text("No state transitions recorded yet.").foregroundStyle(.secondary)
+                        } else {
+                            ForEach(Array(model.monitoringEvents.suffix(100).reversed())) { event in
+                                HStack(alignment: .top, spacing: 10) {
+                                    StatusDot(state: event.state)
+                                    Text(event.timestamp.formatted(date: .abbreviated, time: .standard))
+                                        .font(.system(.caption, design: .monospaced))
+                                        .frame(width: 150, alignment: .leading)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(event.title).fontWeight(.semibold)
+                                        Text(event.detail).font(.caption).foregroundStyle(.secondary)
+                                    }
+                                    Spacer()
+                                }
+                                Divider()
+                            }
+                        }
+                    }
+                }
+
+                MetricCard(title: "Peer inactivity", icon: "network") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Peers are marked offline after \(Int(model.settings.handshakeTimeout)) seconds without a handshake. Configure the threshold in Settings.")
+                            .foregroundStyle(.secondary)
+                        if !model.ignoredPeerIDs.isEmpty {
+                            HStack {
+                                Text("Ignored by Doctor")
+                                Spacer()
+                                Text("\(model.ignoredPeerIDs.count)").foregroundStyle(.secondary)
+                                Button("Reset") { model.resetIgnoredPeers() }
+                            }
+                        }
+                    }
                 }
             }
+            .padding(20)
         }
-    }.formStyle(.grouped) }
+    }
+
+    private var latestSample: MonitoringSample? { model.monitoringSamples.last }
+
+    private func serviceCard(_ title: String, component: String, state: HealthState) -> some View {
+        MetricCard(title: title, icon: "circle.grid.2x2") {
+            VStack(alignment: .leading, spacing: 7) {
+                HStack {
+                    StatusDot(state: state)
+                    Text(state.rawValue.capitalized).font(.title3.bold())
+                }
+                KeyValueRow(key: "Current streak", value: currentStreak(component))
+                KeyValueRow(key: "Changes · 24h", value: String(changes24h(component)))
+            }
+        }
+    }
+
+    private func currentStreak(_ component: String) -> String {
+        guard let firstSample = model.monitoringSamples.first else { return "—" }
+        let since = model.monitoringEvents.last(where: { $0.component == component })?.timestamp ?? firstSample.timestamp
+        return durationString(Date().timeIntervalSince(since))
+    }
+
+    private func changes24h(_ component: String) -> Int {
+        let cutoff = Date().addingTimeInterval(-86_400)
+        return model.monitoringEvents.filter { $0.component == component && $0.timestamp >= cutoff }.count
+    }
+
+    private func durationString(_ interval: TimeInterval) -> String {
+        let seconds = max(0, Int(interval))
+        let days = seconds / 86_400
+        let hours = (seconds % 86_400) / 3_600
+        let minutes = (seconds % 3_600) / 60
+        if days > 0 { return "\(days)d \(hours)h" }
+        if hours > 0 { return "\(hours)h \(minutes)m" }
+        return "\(minutes)m"
+    }
+
+    private func averageMetric(_ title: String, _ values: [Double], suffix: String = "%") -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title).font(.caption).foregroundStyle(.secondary)
+            Text(values.isEmpty ? "—" : String(format: "%.0f%@", values.reduce(0, +) / Double(values.count), suffix))
+                .font(.title3.bold())
+                .monospacedDigit()
+        }
+    }
 }
 
 struct ActivityView: View {

@@ -175,6 +175,37 @@ struct LogEntry: Identifiable, Sendable {
     let exitCode: Int32
 }
 
+struct MonitoringSample: Identifiable, Codable, Sendable {
+    let id: UUID
+    let timestamp: Date
+    let cpuPercent: Double
+    let memoryPercent: Double
+    let diskPercent: Double
+    let pingMilliseconds: Double?
+    let vpsState: HealthState
+    let wireGuardState: HealthState
+    let adGuardState: HealthState
+    let antiZapretState: HealthState
+    let publicDNSExposed: Bool
+    let publicListeners: [String]
+}
+
+struct MonitoringEvent: Identifiable, Codable, Sendable {
+    let id: UUID
+    let timestamp: Date
+    let component: String
+    let title: String
+    let detail: String
+    let state: HealthState
+    let recovered: Bool
+}
+
+struct MonitoringRecordResult: Sendable {
+    let samples: [MonitoringSample]
+    let events: [MonitoringEvent]
+    let newEvents: [MonitoringEvent]
+}
+
 struct DiagnosticResult: Identifiable, Codable, Sendable {
     let id: UUID
     let date: Date

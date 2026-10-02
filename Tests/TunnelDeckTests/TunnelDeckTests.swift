@@ -312,3 +312,57 @@ import Testing
     #expect(result.publicItems.contains { $0.service == "SSH" })
     #expect(result.privateItems.contains { $0.service == "AdGuard Web" && $0.state == .online })
 }
+
+@Test func monitoringPingParser() {
+    let output = "64 bytes from 1.1.1.1: icmp_seq=1 ttl=56 time=11.7 ms"
+    #expect(MonitoringMetricParser.pingMilliseconds(output) == 11.7)
+    #expect(MonitoringMetricParser.pingMilliseconds("request timeout") == nil)
+}
+
+@Test func monitoringEventsAreTransitionOnlyAndRecoverCleanly() {
+    let now = Date()
+    let baseline = MonitoringSample(
+        id: UUID(), timestamp: now, cpuPercent: 5, memoryPercent: 10, diskPercent: 20, pingMilliseconds: 10,
+        vpsState: .online, wireGuardState: .online, adGuardState: .online, antiZapretState: .online,
+        publicDNSExposed: false, publicListeners: ["tcp:22", "udp:51820"]
+    )
+    #expect(MonitoringEventBuilder.events(from: nil, to: baseline).isEmpty)
+
+    let down = MonitoringSample(
+        id: UUID(), timestamp: now.addingTimeInterval(30), cpuPercent: 0, memoryPercent: 0, diskPercent: 20, pingMilliseconds: nil,
+        vpsState: .offline, wireGuardState: .offline, adGuardState: .unknown, antiZapretState: .unknown,
+        publicDNSExposed: false, publicListeners: []
+    )
+    let downEvents = MonitoringEventBuilder.events(from: baseline, to: down)
+    #expect(downEvents.count == 1)
+    #expect(downEvents[0].component == "vps")
+    #expect(downEvents[0].state == .offline)
+
+    let recovered = MonitoringSample(
+        id: UUID(), timestamp: now.addingTimeInterval(60), cpuPercent: 6, memoryPercent: 11, diskPercent: 21, pingMilliseconds: 12,
+        vpsState: .online, wireGuardState: .online, adGuardState: .online, antiZapretState: .online,
+        publicDNSExposed: false, publicListeners: ["tcp:22", "udp:51820"]
+    )
+    let recoveryEvents = MonitoringEventBuilder.events(from: down, to: recovered)
+    #expect(recoveryEvents.count == 1)
+    #expect(recoveryEvents[0].component == "vps")
+    #expect(recoveryEvents[0].recovered)
+}
+
+@Test func monitoringEventsDetectExposureDiskAndNewListener() {
+    let now = Date()
+    let before = MonitoringSample(
+        id: UUID(), timestamp: now, cpuPercent: 5, memoryPercent: 10, diskPercent: 70, pingMilliseconds: 10,
+        vpsState: .online, wireGuardState: .online, adGuardState: .online, antiZapretState: .online,
+        publicDNSExposed: false, publicListeners: ["tcp:22"]
+    )
+    let after = MonitoringSample(
+        id: UUID(), timestamp: now.addingTimeInterval(30), cpuPercent: 6, memoryPercent: 11, diskPercent: 85, pingMilliseconds: 12,
+        vpsState: .online, wireGuardState: .online, adGuardState: .online, antiZapretState: .online,
+        publicDNSExposed: true, publicListeners: ["tcp:22", "tcp:8080"]
+    )
+    let events = MonitoringEventBuilder.events(from: before, to: after)
+    #expect(events.contains { $0.component == "dnsPublic" && $0.state == .critical })
+    #expect(events.contains { $0.component == "disk" && $0.state == .warning })
+    #expect(events.contains { $0.component == "listeners" && $0.detail.contains("tcp:8080") })
+}
