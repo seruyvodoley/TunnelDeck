@@ -1,4 +1,4 @@
-# TunnelDeck 1.2.8
+# TunnelDeck 1.2.9
 
 Native macOS control panel for a self-hosted WireGuard, AntiZapret and AdGuard Home VPS. Built with Swift, SwiftUI and the system OpenSSH client—no Electron, embedded terminal, passwords or private keys in the app bundle.
 
@@ -136,6 +136,15 @@ swift test
 ```
 
 `swift test` requires a full Xcode installation because the suite uses Swift Testing macros. The helper tests use system Python and never connect to a production server.
+
+## 1.2.9 WireGuard peer and AdGuard history
+
+- Monitoring now keeps seven-day, per-VPS history for every discovered clean-WireGuard peer: online/offline state, latest handshake and RX/TX counters.
+- The Monitoring screen summarizes per-peer traffic transferred inside the selected 1/6/24-hour window and shows the most recent handshake state without storing private or preshared keys.
+- AdGuard API statistics are sampled in the background at most once per minute when credentials are configured, with query count, blocked count, blocked percentage and average processing time retained locally.
+- AdGuard history shows query/blocked deltas and blocked-percentage trends over the same monitoring window.
+- Counter-reset-safe analytics avoid negative traffic/query deltas after service or interface restarts.
+- All telemetry remains local on the Mac; server helper stays at 1.2.1 and no VPS/router configuration is changed.
 
 ## 1.2.8 Incident Center and alert rules
 

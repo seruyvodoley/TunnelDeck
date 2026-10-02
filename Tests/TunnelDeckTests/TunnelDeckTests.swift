@@ -417,3 +417,35 @@ import Testing
     let repeated = AlertRuleEngine.evaluate(previous: current, current: current, newEvents: [], rules: rules, lastFired: last, now: current.timestamp)
     #expect(repeated.triggers.isEmpty)
 }
+
+@Test func peerHistoryTrafficDeltaHandlesGrowthAndReset() {
+    let now = Date()
+    let growing = [
+        PeerHistorySample(id: UUID(), timestamp: now, peerID: "p", name: "P", vpnIP: "10.0.0.2/32", status: .online, receivedBytes: 100, sentBytes: 200, latestHandshake: now),
+        PeerHistorySample(id: UUID(), timestamp: now.addingTimeInterval(30), peerID: "p", name: "P", vpnIP: "10.0.0.2/32", status: .online, receivedBytes: 400, sentBytes: 800, latestHandshake: now)
+    ]
+    #expect(PeerHistoryAnalytics.trafficDelta(points: growing) == 900)
+
+    let reset = [
+        PeerHistorySample(id: UUID(), timestamp: now, peerID: "p", name: "P", vpnIP: "10.0.0.2/32", status: .online, receivedBytes: 900, sentBytes: 900, latestHandshake: now),
+        PeerHistorySample(id: UUID(), timestamp: now.addingTimeInterval(30), peerID: "p", name: "P", vpnIP: "10.0.0.2/32", status: .online, receivedBytes: 100, sentBytes: 200, latestHandshake: now)
+    ]
+    #expect(PeerHistoryAnalytics.trafficDelta(points: reset) == 300)
+}
+
+@Test func adGuardHistoryDeltasHandleCounterReset() {
+    let now = Date()
+    let points = [
+        AdGuardHistorySample(id: UUID(), timestamp: now, totalQueries: 1000, blockedQueries: 200, blockedPercentage: 20, averageProcessingTime: 0.001),
+        AdGuardHistorySample(id: UUID(), timestamp: now.addingTimeInterval(60), totalQueries: 1200, blockedQueries: 260, blockedPercentage: 21.6, averageProcessingTime: 0.001)
+    ]
+    #expect(AdGuardHistoryAnalytics.queryDelta(points) == 200)
+    #expect(AdGuardHistoryAnalytics.blockedDelta(points) == 60)
+
+    let reset = [
+        points[1],
+        AdGuardHistorySample(id: UUID(), timestamp: now.addingTimeInterval(120), totalQueries: 50, blockedQueries: 10, blockedPercentage: 20, averageProcessingTime: 0.001)
+    ]
+    #expect(AdGuardHistoryAnalytics.queryDelta(reset) == 50)
+    #expect(AdGuardHistoryAnalytics.blockedDelta(reset) == 10)
+}

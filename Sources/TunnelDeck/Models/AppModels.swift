@@ -206,6 +206,27 @@ struct MonitoringRecordResult: Sendable {
     let newEvents: [MonitoringEvent]
 }
 
+struct PeerHistorySample: Identifiable, Codable, Sendable {
+    let id: UUID
+    let timestamp: Date
+    let peerID: String
+    let name: String
+    let vpnIP: String
+    let status: HealthState
+    let receivedBytes: UInt64
+    let sentBytes: UInt64
+    let latestHandshake: Date?
+}
+
+struct AdGuardHistorySample: Identifiable, Codable, Sendable {
+    let id: UUID
+    let timestamp: Date
+    let totalQueries: Int
+    let blockedQueries: Int
+    let blockedPercentage: Double
+    let averageProcessingTime: Double
+}
+
 struct MonitoringIncident: Identifiable, Sendable {
     let id: String
     let component: String
@@ -220,7 +241,7 @@ struct MonitoringIncident: Identifiable, Sendable {
     func duration(reference: Date = Date()) -> TimeInterval { max(0, (end ?? reference).timeIntervalSince(start)) }
 }
 
-enum AlertRuleKind: String, Codable, CaseIterable, Sendable {
+enum AlertRuleKind: String, Codable, CaseIterable, Hashable, Sendable {
     case vpsOffline
     case wireGuardOffline
     case serviceOffline

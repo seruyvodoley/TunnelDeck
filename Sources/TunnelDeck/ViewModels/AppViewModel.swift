@@ -43,6 +43,8 @@ final class AppViewModel: ObservableObject {
     @Published var monitoringWindowHours = 6
     @Published var monitoringIncidents: [MonitoringIncident] = []
     @Published var alertRules: [AlertRule] = []
+    @Published var peerHistory: [PeerHistorySample] = []
+    @Published var adGuardHistory: [AdGuardHistorySample] = []
 
     let ssh = SSHService()
     let adGuardAPI = AdGuardAPIService()
@@ -52,8 +54,10 @@ final class AppViewModel: ObservableObject {
     private let activityStore = ActivityStore()
     private let monitoringStore = MonitoringHistoryStore()
     private let alertRuleStore = AlertRuleStore()
+    private let telemetryHistoryStore = TelemetryHistoryStore()
     private var pollTask: Task<Void, Never>?
     private var previousCPUTicks: (idle: Double, total: Double)?
+    private var lastBackgroundAdGuardRefresh: Date?
 
     init() {
         let decoded = UserDefaults.standard.data(forKey: "settings").flatMap { try? JSONDecoder().decode(AppSettings.self, from: $0) }
@@ -90,7 +94,7 @@ final class AppViewModel: ObservableObject {
     func selectServer(_ id: UUID) {
         guard let server = servers.first(where: { $0.id == id }) else { return }
         activeServerID = id; UserDefaults.standard.set(id.uuidString, forKey: "activeServerID"); settings.host = server.host; settings.port = server.port; settings.username = server.username; settings.keyPath = server.keyPath
-        system = SystemSnapshot(); wireGuard = WireGuardSnapshot(); units = []; listeners = []; healthReport = nil; security = SecuritySnapshot(); monitoringSamples = []; monitoringEvents = []; monitoringIncidents = []; alertRules = []; loadServerScopedState()
+        system = SystemSnapshot(); wireGuard = WireGuardSnapshot(); units = []; listeners = []; healthReport = nil; security = SecuritySnapshot(); monitoringSamples = []; monitoringEvents = []; monitoringIncidents = []; alertRules = []; peerHistory = []; adGuardHistory = []; lastBackgroundAdGuardRefresh = nil; loadServerScopedState()
         saveSettings(); Task { await loadMonitoringHistory(); await refresh() }
     }
 
@@ -154,7 +158,10 @@ final class AppViewModel: ObservableObject {
         })
         profiles = ProfileParser.parseListing(values.14.stdout)
         lastRefresh = Date(); statusMessage = values.0.succeeded ? "Updated" : "SSH unavailable"
-        if values.0.succeeded { await refreshHelper() }
+        if values.0.succeeded {
+            await refreshHelper()
+            await refreshAdGuardHistoryIfNeeded()
+        }
         await recordMonitoringState()
         await performScheduledBackupIfNeeded()
     }
@@ -339,6 +346,25 @@ final class AppViewModel: ObservableObject {
             return
         }
         adGuard = await adGuardAPI.load(baseURL: baseURL, username: username, password: password)
+        if adGuard.available {
+            adGuardHistory = await telemetryHistoryStore.recordAdGuard(host: settings.host, snapshot: adGuard, timestamp: Date())
+        }
+    }
+
+    private func refreshAdGuardHistoryIfNeeded() async {
+        let now = Date()
+        if let lastBackgroundAdGuardRefresh, now.timeIntervalSince(lastBackgroundAdGuardRefresh) < 60 { return }
+        lastBackgroundAdGuardRefresh = now
+
+        let baseURL = KeychainService.load(account: "adguard-url-\(settings.host)") ?? discoveredAdGuardBaseURL() ?? ""
+        let username = KeychainService.load(account: "adguard-user-\(settings.host)") ?? ""
+        let password = KeychainService.load(account: "adguard-password-\(settings.host)") ?? ""
+        guard !baseURL.isEmpty, !username.isEmpty, !password.isEmpty else { return }
+
+        let snapshot = await adGuardAPI.load(baseURL: baseURL, username: username, password: password)
+        guard snapshot.available else { return }
+        adGuard = snapshot
+        adGuardHistory = await telemetryHistoryStore.recordAdGuard(host: settings.host, snapshot: snapshot, timestamp: now)
     }
 
     func refreshSecurityAudit() async {
@@ -502,6 +528,8 @@ final class AppViewModel: ObservableObject {
         monitoringEvents = await monitoringStore.loadEvents(host: settings.host)
         monitoringIncidents = IncidentEngine.build(from: monitoringEvents)
         alertRules = await alertRuleStore.load(host: settings.host)
+        peerHistory = await telemetryHistoryStore.loadPeers(host: settings.host)
+        adGuardHistory = await telemetryHistoryStore.loadAdGuard(host: settings.host)
     }
 
     func setAlertRuleEnabled(_ id: UUID, enabled: Bool) {
@@ -546,6 +574,7 @@ final class AppViewModel: ObservableObject {
         monitoringSamples = result.samples
         monitoringEvents = result.events
         monitoringIncidents = IncidentEngine.build(from: monitoringEvents)
+        peerHistory = await telemetryHistoryStore.recordPeers(host: settings.host, peers: wireGuard.peers, timestamp: sample.timestamp)
 
         if settings.notificationsEnabled {
             let lastFired = loadAlertFireTimes()
