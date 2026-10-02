@@ -74,7 +74,7 @@ actor AdGuardAPIService {
             let ruleText = (item["rules"] as? [[String: Any]])?
                 .compactMap { $0["text"] as? String ?? $0["rule"] as? String }
                 .first
-            let rule = ruleText?.nonEmpty ?? reason.nonEmpty ?? "—"
+            let rule = ruleText.flatMap { $0.isEmpty ? nil : $0 } ?? (reason.isEmpty ? "—" : reason)
             let id = "\(time)|\(client)|\(domain)|\(index)"
             return AdGuardQueryEntry(id: id, time: time, domain: domain, client: client, blocked: blocked, rule: rule)
         }
