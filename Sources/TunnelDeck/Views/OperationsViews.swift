@@ -65,7 +65,7 @@ struct SecurityView: View {
                         ForEach(publicListeners) { listener in HStack { StatusDot(state: listener.port == 53 || listener.process.localizedCaseInsensitiveContains("AdGuardHome") ? .critical : .warning); Text("\(listener.protocolName) \(listener.address):\(listener.port)"); Spacer(); Text(listener.process).foregroundStyle(.secondary) } }
                     }
                 }
-                Text("Additional SSH configuration, firewall policy, permissions and failed-login checks require successful SSH discovery.").foregroundStyle(.secondary)
+                Text("This screen audits discovered public listeners. Deeper SSH-policy, permission and failed-login auditing is not implemented in this build.").foregroundStyle(.secondary)
             }.padding(20)
         }
     }
