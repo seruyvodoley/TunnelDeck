@@ -504,6 +504,7 @@ final class AppViewModel: ObservableObject {
     func loadMonitoringHistory() async {
         monitoringSamples = await monitoringStore.loadSamples(host: settings.host)
         monitoringEvents = await monitoringStore.loadEvents(host: settings.host)
+        rebuildIncidents()
     }
 
     private func recordMonitoringState() async {
@@ -532,6 +533,7 @@ final class AppViewModel: ObservableObject {
         let result = await monitoringStore.record(host: settings.host, sample: sample)
         monitoringSamples = result.samples
         monitoringEvents = result.events
+        rebuildIncidents()
 
         if settings.notificationsEnabled {
             for event in result.newEvents {
@@ -549,6 +551,8 @@ final class AppViewModel: ObservableObject {
         guard let unit = units.first(where: predicate) else { return .unknown }
         return unit.activeState == "active" ? .online : .offline
     }
+
+    private func rebuildIncidents() { guard let nodeID = activeServerID else { incidents = []; return }; incidents = IncidentEngine.incidents(events: monitoringEvents, nodeID: nodeID); updateFleet() }
 
     var activeNodeName: String { servers.first(where: { $0.id == activeServerID })?.name ?? (system.hostname == "—" ? "VPS" : system.hostname) }
     func updateFleet() { fleetSummaries = fleetController.summaries(profiles: servers, activeID: activeServerID, system: system, wireGuard: wireGuard, units: units, security: security, incidents: incidents) }
@@ -601,10 +605,10 @@ final class AppViewModel: ObservableObject {
 }
 
 enum SidebarSection: String, CaseIterable, Identifiable {
-    case fleet = "Fleet Overview", topology = "Topology", dashboard = "Node Dashboard", doctor = "Doctor", monitoring = "Monitoring", wireGuard = "WireGuard", profiles = "Profiles", dns = "DNS & AdGuard", antiZapret = "AntiZapret", services = "Services", diagnostics = "Diagnostics", security = "Security", backups = "Backups", activity = "Activity", recovery = "Recovery", router = "Router", homeAccess = "Home Access", logs = "Logs", settings = "Settings"
+    case fleet = "Fleet Overview", topology = "Topology", dashboard = "Node Dashboard", incidents = "Incidents", doctor = "Doctor", monitoring = "Monitoring", wireGuard = "WireGuard", profiles = "Profiles", dns = "DNS & AdGuard", antiZapret = "AntiZapret", services = "Services", diagnostics = "Diagnostics", security = "Security", backups = "Backups", activity = "Activity", recovery = "Recovery", router = "Router", homeAccess = "Home Access", logs = "Logs", settings = "Settings"
     var id: String { rawValue }
     var icon: String {
-        switch self { case .fleet: "server.rack"; case .topology: "point.3.connected.trianglepath.dotted"; case .dashboard: "gauge"; case .doctor: "cross.case"; case .monitoring: "waveform.path.ecg"; case .wireGuard: "network"; case .profiles: "doc.text"; case .antiZapret: "shield.lefthalf.filled"; case .dns: "server.rack"; case .services: "gearshape.2"; case .diagnostics: "stethoscope"; case .security: "lock.shield"; case .backups: "externaldrive.badge.timemachine"; case .activity: "clock.arrow.circlepath"; case .recovery: "lifepreserver"; case .router: "wifi.router"; case .homeAccess: "house"; case .logs: "list.bullet.rectangle"; case .settings: "gear" }
+        switch self { case .fleet: "server.rack"; case .topology: "point.3.connected.trianglepath.dotted"; case .dashboard: "gauge"; case .incidents: "exclamationmark.triangle"; case .doctor: "cross.case"; case .monitoring: "waveform.path.ecg"; case .wireGuard: "network"; case .profiles: "doc.text"; case .antiZapret: "shield.lefthalf.filled"; case .dns: "server.rack"; case .services: "gearshape.2"; case .diagnostics: "stethoscope"; case .security: "lock.shield"; case .backups: "externaldrive.badge.timemachine"; case .activity: "clock.arrow.circlepath"; case .recovery: "lifepreserver"; case .router: "wifi.router"; case .homeAccess: "house"; case .logs: "list.bullet.rectangle"; case .settings: "gear" }
     }
 }
 
