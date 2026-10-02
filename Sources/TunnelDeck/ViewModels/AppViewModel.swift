@@ -382,7 +382,7 @@ final class AppViewModel: ObservableObject {
     }
 
     private func evaluateMonitoringState() async {
-        let current = ["vps": system.health.rawValue, "wg0": wireGuard.state.rawValue, "adguard": units.first { $0.name.contains("AdGuardHome") }?.activeState ?? "unknown", "antizapret": units.first { $0.name == "antizapret.service" }?.activeState ?? "unknown", "dnsPublic": String(listeners.contains { $0.isPublic && $0.port == 53 }), "diskCritical": String(system.diskPercent >= 90)]
+        let current = ["vps": system.health.rawValue, "wg0": wireGuard.state.rawValue, "adguard": units.first { $0.name.contains("AdGuardHome") }?.activeState ?? "unknown", "antizapret": units.first { $0.name == "antizapret.service" }?.activeState ?? "unknown", "dnsPublic": String(listeners.contains { ($0.isPublic || $0.address == settings.host) && $0.port == 53 }), "diskCritical": String(system.diskPercent >= 90)]
         let stateKey = "monitoringState-\(settings.host)"
         let previous = UserDefaults.standard.dictionary(forKey: stateKey) as? [String: String] ?? [:]
         if settings.notificationsEnabled {
