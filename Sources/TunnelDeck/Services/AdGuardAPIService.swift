@@ -16,7 +16,7 @@ actor AdGuardAPIService {
             snapshot.topQueried = Self.names(stats["top_queried_domains"]); snapshot.topBlocked = Self.names(stats["top_blocked_domains"]); snapshot.topClients = Self.names(stats["top_clients"])
             let filtering = try await json(path: "/control/filtering/status", baseURL: baseURL, username: username, password: password)
             snapshot.filters = (filtering["filters"] as? [[String: Any]] ?? []).compactMap { $0["name"] as? String }
-            let log = try await json(path: "/control/querylog?limit=50", baseURL: baseURL, username: username, password: password)
+            let log = try await json(path: "/control/querylog", baseURL: baseURL, username: username, password: password)
             snapshot.queryLog = (log["data"] as? [[String: Any]] ?? []).compactMap { item in (item["question"] as? [String: Any])?["name"] as? String }
         } catch { snapshot.error = SecretRedactor.redact(error.localizedDescription) }
         return snapshot
@@ -28,7 +28,15 @@ actor AdGuardAPIService {
         let credential = Data("\(username):\(password)".utf8).base64EncodedString()
         request.setValue("Basic \(credential)", forHTTPHeaderField: "Authorization")
         let (data, response) = try await URLSession.shared.data(for: request)
-        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else { throw NSError(domain: "TunnelDeck.AdGuard", code: (response as? HTTPURLResponse)?.statusCode ?? -1, userInfo: [NSLocalizedDescriptionKey: "AdGuard API rejected the request"]) }
+        guard let http = response as? HTTPURLResponse else {
+            throw NSError(domain: "TunnelDeck.AdGuard", code: -1, userInfo: [NSLocalizedDescriptionKey: "AdGuard API returned an invalid HTTP response"])
+        }
+        guard (200..<300).contains(http.statusCode) else {
+            let message = http.statusCode == 401
+                ? "AdGuard rejected the username or password (HTTP 401)"
+                : "AdGuard API returned HTTP \(http.statusCode)"
+            throw NSError(domain: "TunnelDeck.AdGuard", code: http.statusCode, userInfo: [NSLocalizedDescriptionKey: message])
+        }
         return try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
     }
 
