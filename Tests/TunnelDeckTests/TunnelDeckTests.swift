@@ -305,9 +305,10 @@ import Testing
         wireGuardAll: wgAll,
         openVPNBinds: ovpn
     )
-    #expect(result.public.count == 3)
-    #expect(result.public.contains { $0.service == "Clean WireGuard" && $0.addresses.count == 2 })
-    #expect(result.public.contains { $0.service == "AntiZapret WireGuard" })
-    #expect(result.public.contains { $0.service == "AntiZapret OpenVPN" })
-    #expect(result.private.contains { $0.service == "AdGuard Web" && $0.state == .online })
+    #expect(result.publicItems.count == 4)
+    #expect(result.publicItems.contains { $0.service == "Clean WireGuard" && $0.addresses.count == 2 })
+    #expect(result.publicItems.contains { $0.service == "AntiZapret WireGuard" })
+    #expect(result.publicItems.contains { $0.service == "AntiZapret OpenVPN" })
+    #expect(result.publicItems.contains { $0.service == "SSH" })
+    #expect(result.privateItems.contains { $0.service == "AdGuard Web" && $0.state == .online })
 }
