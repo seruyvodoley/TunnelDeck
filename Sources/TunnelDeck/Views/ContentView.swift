@@ -6,7 +6,7 @@ struct ContentView: View {
         NavigationSplitView {
             List(SidebarSection.allCases, selection: $model.selectedSection) { section in Label(section.rawValue, systemImage: section.icon).tag(section) }
                 .navigationTitle("TunnelDeck")
-                .safeAreaInset(edge: .bottom) { HStack { StatusDot(state: model.system.health); Text(CommandPolicy.readOnlyMode ? "READ-ONLY" : "WRITE").font(.caption.bold()); Spacer() }.padding() }
+                .safeAreaInset(edge: .bottom) { HStack { StatusDot(state: model.system.health); Text(model.settings.writeModeEnabled ? "WRITE MODE" : "READ-ONLY").font(.caption.bold()); Spacer() }.padding() }
         } detail: { selectedView.navigationTitle(model.selectedSection.rawValue).toolbar { ToolbarItem { Button { Task { await model.refresh() } } label: { Label("Refresh", systemImage: "arrow.clockwise") }.disabled(model.isRefreshing) } } }
     }
 
