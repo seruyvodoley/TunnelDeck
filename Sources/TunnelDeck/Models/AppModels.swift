@@ -1,6 +1,6 @@
 import Foundation
 
-enum HealthState: String, Codable, Sendable { case online, warning, offline, unknown }
+enum HealthState: String, Codable, Sendable { case online, warning, critical, offline, unknown }
 
 struct AppSettings: Codable, Sendable, Equatable {
     var host = ""
@@ -110,7 +110,7 @@ struct Listener: Identifiable, Sendable, Hashable {
     let address: String
     let port: Int
     let process: String
-    var isPublic: Bool { address == "0.0.0.0" || address == "::" || address == "[::]" }
+    var isPublic: Bool { address == "0.0.0.0" || address == "::" || address == "[::]" || address == "*" }
 }
 
 struct ProfileMetadata: Identifiable, Sendable, Hashable {
