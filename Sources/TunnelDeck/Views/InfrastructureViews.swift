@@ -1,0 +1,94 @@
+import AppKit
+import SwiftUI
+import Charts
+
+struct WireGuardView: View {
+    @EnvironmentObject var model: AppViewModel
+    @StateObject private var state = WireGuardScreenState()
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("wg0 · \(model.wireGuard.address) · MTU \(model.wireGuard.mtu)").foregroundStyle(.secondary)
+                Spacer()
+                Button("Add Peer") { state.prepare(using: model); state.showAdd = true }.disabled(!canWrite)
+                Button("Remove") { state.showRemove = true }.disabled(!canWrite || state.selection.count != 1)
+                Button("Restart") {}.disabled(true).help("Requires a dedicated confirmed service transaction")
+            }.padding()
+            Table(model.wireGuard.peers, selection: $state.selection) {
+                TableColumn("Name", value: \.name)
+                TableColumn("VPN IP", value: \.vpnIP)
+                TableColumn("Public Key", value: \.publicKey)
+                TableColumn("Endpoint", value: \.endpoint)
+                TableColumn("Handshake") { peer in Text(peer.latestHandshake?.formatted(.relative(presentation: .numeric)) ?? "Never") }
+                TableColumn("RX") { peer in Text(peer.receivedBytes.byteString) }
+                TableColumn("TX") { peer in Text(peer.sentBytes.byteString) }
+                TableColumn("Status") { peer in HStack { StatusDot(state: peer.status); Text(peer.status.rawValue.capitalized) } }
+                TableColumn("Managed") { peer in Text(model.managedPeers.first(where: { $0.publicKey == peer.id })?.managedBy ?? "Existing") }
+            }
+        }
+        .sheet(isPresented: $state.showAdd) { AddPeerSheet(state: state) { Task { if await model.addPeer(name: state.name, ip: state.ip, dns: state.dns, mtu: state.mtu, allowedIPs: state.allowedIPs, endpoint: state.endpoint) { state.showAdd = false } } } }
+        .alert("Remove WireGuard peer?", isPresented: $state.showRemove) {
+            Button("Cancel", role: .cancel) {}
+            Button("Remove peer", role: .destructive) { if let key = state.selection.first { Task { _ = await model.removePeer(publicKey: key, deleteClient: state.deleteClient, allowExisting: model.managedPeers.first(where: { $0.publicKey == key }) == nil) } } }
+        } message: { Text("TunnelDeck will create a backup, remove the exact public key from wg0.conf and the live interface, then run a health check. Existing peers require elevated confirmation.") }
+    }
+    private var canWrite: Bool { model.settings.writeModeEnabled && model.helperVersion == HelperService.localVersion }
+}
+
+@MainActor
+final class WireGuardScreenState: ObservableObject {
+    @Published var selection = Set<String>(); @Published var showAdd = false; @Published var showRemove = false
+    @Published var name = ""; @Published var ip = ""; @Published var dns = "1.1.1.1"; @Published var mtu = 1380; @Published var allowedIPs = "0.0.0.0/0"; @Published var endpoint = ""; @Published var deleteClient = false
+    func prepare(using model: AppViewModel) {
+        ip = model.suggestedPeerIP()
+        let serverIP = model.wireGuard.address.split(separator: "/").first.map(String.init) ?? ""
+        dns = model.listeners.contains { $0.address == serverIP && $0.port == 53 } ? serverIP : "1.1.1.1"
+        endpoint = model.settings.host.isEmpty ? "" : "\(model.settings.host):\(model.wireGuard.listenPort == "—" ? "51820" : model.wireGuard.listenPort)"
+    }
+}
+
+struct AddPeerSheet: View {
+    @ObservedObject var state: WireGuardScreenState
+    let create: () -> Void
+    var body: some View { VStack(alignment: .leading, spacing: 16) { Text("Add WireGuard Peer").font(.title.bold()); Form { TextField("Name", text: $state.name); TextField("VPN IP", text: $state.ip); TextField("DNS", text: $state.dns); TextField("MTU", value: $state.mtu, format: .number); TextField("AllowedIPs", text: $state.allowedIPs); TextField("Endpoint", text: $state.endpoint) }; Text("A backup is created first. wg0 is updated live without restart. Client secrets are saved locally with mode 0600 and never logged.").foregroundStyle(.secondary); HStack { Spacer(); Button("Cancel") { state.showAdd = false }; Button("Create Peer", action: create).buttonStyle(.borderedProminent).disabled(state.name.isEmpty || state.ip.isEmpty) } }.padding(24).frame(width: 560) }
+}
+
+struct ProfilesView: View {
+    @EnvironmentObject var model: AppViewModel
+    @StateObject private var state = ProfileScreenState()
+    var body: some View { VSplitView { VStack(alignment: .leading) { Text("Local Profiles").font(.headline).padding([.top,.leading]); Table(model.localProfiles, selection: $state.selection) { TableColumn("Name", value: \.name); TableColumn("Type", value: \.type); TableColumn("Modified") { Text($0.modified.formatted()) }; TableColumn("Actions") { profile in HStack { Button("Reveal") { ProfileStore.reveal(profile) }; Button("Open With…") { ProfileStore.open(profile) }; Button("QR") { state.showQR(profile) } } } }.frame(minHeight: 220) }; VStack(alignment: .leading) { Text("Server Profile Inventory").font(.headline).padding([.top,.leading]); Table(model.profiles) { TableColumn("Name", value: \.name); TableColumn("Type", value: \.type); TableColumn("Category", value: \.category); TableColumn("Modified", value: \.modified); TableColumn("Path", value: \.path) } } }.sheet(isPresented: $state.qrVisible) { if let image = state.qrImage { VStack { Text(state.qrName).font(.title2.bold()); Image(nsImage: image).interpolation(.none).resizable().frame(width: 360, height: 360); Text("QR contains private client configuration. Do not share it.").foregroundStyle(.red) }.padding() } } }
+}
+
+@MainActor private final class ProfileScreenState: ObservableObject {
+    @Published var selection = Set<String>(); @Published var qrVisible = false; @Published var qrImage: NSImage?; @Published var qrName = ""
+    func showQR(_ profile: LocalProfile) { guard let content = try? ProfileStore.content(profile) else { return }; qrName = profile.name; qrImage = ProfileStore.qrImage(for: content); qrVisible = qrImage != nil }
+}
+
+struct AntiZapretView: View {
+    @EnvironmentObject var model: AppViewModel
+    var body: some View { ScrollView { VStack(alignment: .leading, spacing: 18) { Text("Services").font(.title2.bold()); ForEach(model.units.filter { $0.name.contains("antizapret") || $0.name.contains("vpn-udp") || $0.name.contains("wg-quick@vpn") }) { unit in HStack { StatusDot(state: unit.health); Text(unit.name); Spacer(); Text("\(unit.activeState) / \(unit.subState)").foregroundStyle(.secondary) }.padding(10).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10)) }; Text("Setup flags").font(.title2.bold()); Grid(alignment: .leading, horizontalSpacing: 30, verticalSpacing: 10) { ForEach(model.antiZapretSettings.keys.sorted(), id: \.self) { key in GridRow { Text(key).foregroundStyle(.secondary); Text(model.antiZapretSettings[key] ?? "—").textSelection(.enabled) } } }; HStack { Button("View Logs") { model.selectedSection = .logs }; Button("Restart") {}.disabled(true); Button("Update Lists") {}.disabled(true) } }.padding(20).frame(maxWidth: 850, alignment: .leading) } }
+}
+
+struct DNSView: View {
+    @EnvironmentObject var model: AppViewModel
+    var dns: [Listener] { model.listeners.filter { $0.port == 53 } }
+    var web: [Listener] { model.listeners.filter { $0.port == 3000 } }
+    var body: some View { let serverIP = model.wireGuard.address.split(separator: "/").first.map(String.init) ?? ""; ScrollView { VStack(alignment: .leading, spacing: 18) { if dns.contains(where: { $0.isPublic || $0.address == model.settings.host }) { Label("DNS is exposed on a public/wildcard address", systemImage: "exclamationmark.triangle.fill").foregroundStyle(.red).padding().background(.red.opacity(0.1), in: RoundedRectangle(cornerRadius: 12)) }; listenerCard("AntiZapret DNS", dns.filter { $0.address.hasPrefix("127.") }); listenerCard("AdGuard Home DNS", dns.filter { $0.address == serverIP }); listenerCard("Other DNS listeners", dns.filter { !$0.address.hasPrefix("127.") && $0.address != serverIP }); listenerCard("AdGuard Web UI", web); HStack { Button("Open AdGuard") { if !serverIP.isEmpty { LocalNetworkService.open("http://\(serverIP):3000") } }; Button("Restart AdGuard") {}.disabled(true) } }.padding(20) } }
+    private func listenerCard(_ title: String, _ values: [Listener]) -> some View { MetricCard(title: title, icon: "server.rack") { VStack(alignment: .leading, spacing: 8) { if values.isEmpty { Text("Not detected").foregroundStyle(.secondary) }; ForEach(values) { item in HStack { StatusDot(state: item.isPublic ? .warning : .online); Text("\(item.protocolName) · \(item.address):\(item.port)"); Spacer(); Text(item.process).foregroundStyle(.secondary) } } } } }
+}
+
+struct DiagnosticsView: View {
+    @EnvironmentObject var model: AppViewModel
+    var body: some View { ScrollView { VStack(alignment: .leading, spacing: 18) { HStack { diagnosticButton("SSH Test", .uname); diagnosticButton("Ping Internet", .pingInternet); diagnosticButton("DNS Resolution", .dnsTest); diagnosticButton("WireGuard Status", .wireGuard); diagnosticButton("Detect iperf3", .iperfDetection) }; GroupBox("iperf3 — manual only") { HStack { Text("TCP upload/download and UDP tests are intentionally not started automatically."); Spacer(); Button("Run iperf3…") {}.disabled(true) }.padding(8) }; if !model.diagnostics.isEmpty { Chart(model.diagnostics.suffix(30)) { item in BarMark(x: .value("Test", item.date), y: .value("Duration", item.milliseconds ?? 0)).foregroundStyle(item.success ? .green : .red) }.frame(height: 220) }; Table(model.diagnostics.reversed()) { TableColumn("Time") { Text($0.date.formatted(date: .abbreviated, time: .standard)) }; TableColumn("Test", value: \.name); TableColumn("Result") { Text($0.success ? "Passed" : "Failed").foregroundStyle($0.success ? .green : .red) }; TableColumn("Summary", value: \.summary) }.frame(minHeight: 260) }.padding(20) } }
+    private func diagnosticButton(_ title: String, _ command: ReadCommand) -> some View { Button(title) { Task { await model.runDiagnostic(command, name: title) } } }
+}
+
+struct RouterView: View {
+    @EnvironmentObject var model: AppViewModel
+    var reachable: Bool { !model.system.macLANIP.isEmpty && model.system.macLANIP != "—" }
+    var body: some View { ScrollView { LazyVGrid(columns: [GridItem(.adaptive(minimum: 340))], spacing: 16) { MetricCard(title: "Home Router", icon: "wifi.router") { VStack(spacing: 10) { HStack { StatusDot(state: reachable ? .online : .offline); Text(reachable ? "LAN detected" : "Not on a LAN"); Spacer() }; KeyValueRow(key: "Current Mac LAN", value: model.system.macLANIP); Text("Open your router admin URL manually. TunnelDeck never stores router credentials or uses private vendor APIs.").foregroundStyle(.secondary) } } }.padding(20) } }
+}
+
+struct HomeAccessView: View {
+    var body: some View { ContentUnavailableView { Label("Remote Home Access", systemImage: "house.and.flag") } description: { Text("Store imported router WireGuard profiles locally for Macs and phones. Router configuration is never changed automatically.") } actions: { Button("Import Local Profile…") {}.disabled(true) } }
+}

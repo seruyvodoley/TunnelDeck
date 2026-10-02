@@ -1,0 +1,225 @@
+import Foundation
+import SwiftUI
+
+@MainActor
+final class AppViewModel: ObservableObject {
+    @Published var settings: AppSettings
+    @Published var system = SystemSnapshot()
+    @Published var wireGuard = WireGuardSnapshot()
+    @Published var units: [UnitStatus] = []
+    @Published var listeners: [Listener] = []
+    @Published var profiles: [ProfileMetadata] = []
+    @Published var antiZapretSettings: [String: String] = [:]
+    @Published var logs: [LogEntry] = []
+    @Published var diagnostics: [DiagnosticResult] = []
+    @Published var isRefreshing = false
+    @Published var lastRefresh: Date?
+    @Published var selectedSection: SidebarSection = .dashboard
+    @Published var showOnboarding: Bool
+    @Published var statusMessage = "Read-only mode"
+    @Published var helperVersion: String?
+    @Published var helperError: AppError?
+    @Published var backups: [BackupRecord] = []
+    @Published var presentedError: AppError?
+    @Published var localProfiles: [LocalProfile] = []
+    @Published var managedPeers: [HelperPeer] = []
+
+    let ssh = SSHService()
+    lazy var helper = HelperService(ssh: ssh)
+    private let history = DiagnosticHistoryStore()
+    private var pollTask: Task<Void, Never>?
+    private var previousCPUTicks: (idle: Double, total: Double)?
+
+    init() {
+        let decoded = UserDefaults.standard.data(forKey: "settings").flatMap { try? JSONDecoder().decode(AppSettings.self, from: $0) }
+        var initialSettings = decoded ?? AppSettings()
+        if let storedPath = KeychainService.load(account: "ssh-key-path"), !storedPath.isEmpty { initialSettings.keyPath = storedPath }
+        settings = initialSettings
+        showOnboarding = !initialSettings.completedOnboarding
+        system.macLANIP = LocalNetworkService.lanIPv4()
+        localProfiles = ProfileStore.list()
+        Task { diagnostics = await history.load() }
+    }
+
+    var configuration: SSHConfiguration { SSHConfiguration(host: settings.host, username: settings.username, keyPath: NSString(string: settings.keyPath).expandingTildeInPath, timeout: 8, port: settings.port) }
+
+    func saveSettings() {
+        try? KeychainService.save(settings.keyPath, account: "ssh-key-path")
+        var persisted = settings; persisted.keyPath = ""
+        if let data = try? JSONEncoder().encode(persisted) { UserDefaults.standard.set(data, forKey: "settings") }
+        configurePolling()
+    }
+
+    func completeOnboarding() { settings.completedOnboarding = true; showOnboarding = false; saveSettings() }
+
+    func configurePolling() {
+        pollTask?.cancel()
+        guard settings.pollingEnabled else { return }
+        pollTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(self?.settings.pollingInterval ?? 5))
+                await self?.refresh()
+            }
+        }
+    }
+
+    func refresh() async {
+        guard !isRefreshing else { return }
+        isRefreshing = true; defer { isRefreshing = false }
+        system.macLANIP = LocalNetworkService.lanIPv4()
+        async let hostname = execute(.hostname, subsystem: "System")
+        async let cpu = execute(.cpu, subsystem: "System")
+        async let macPublicIP = LocalNetworkService.publicIPv4()
+        async let os = execute(.osRelease, subsystem: "System")
+        async let uname = execute(.uname, subsystem: "System")
+        async let uptime = execute(.uptime, subsystem: "System")
+        async let memory = execute(.memory, subsystem: "System")
+        async let disk = execute(.disk, subsystem: "System")
+        async let ipv4 = execute(.publicIPv4, subsystem: "Network")
+        async let ipv6 = execute(.publicIPv6, subsystem: "Network")
+        async let wg = execute(.wireGuard, subsystem: "WireGuard")
+        async let wgAddress = execute(.wireGuardAddress, subsystem: "WireGuard")
+        async let wgLink = execute(.wireGuardLink, subsystem: "WireGuard")
+        async let serviceUnits = execute(.units, subsystem: "systemd")
+        async let socketListeners = execute(.listeners, subsystem: "DNS")
+        async let azSettings = execute(.antiZapretSettings, subsystem: "AntiZapret")
+        async let profileList = execute(.profiles, subsystem: "Profiles")
+        let values = await (hostname, os, uname, uptime, memory, disk, ipv4, ipv6, wg, wgAddress, wgLink, serviceUnits, socketListeners, azSettings, profileList, cpu, macPublicIP)
+        system.hostname = values.0.stdout.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty ?? "—"
+        system.osVersion = parseOS(values.1.stdout)
+        system.kernel = values.2.stdout.split(separator: " ").dropFirst(2).first.map(String.init) ?? "—"
+        system.uptime = values.3.stdout.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty ?? "—"
+        system.loadAverage = parseLoad(values.3.stdout)
+        system.memoryPercent = parseMemory(values.4.stdout)
+        system.diskPercent = parseDisk(values.5.stdout)
+        system.publicIPv4 = values.6.stdout.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty ?? "—"
+        system.publicIPv6 = values.7.stdout.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty ?? "—"
+        system.cpuPercent = parseCPU(values.15.stdout)
+        system.macPublicIP = values.16
+        system.sshAvailable = values.0.succeeded
+        system.health = values.0.succeeded ? .online : .offline
+        wireGuard = WireGuardParser.parse(values.8.stdout, timeout: settings.handshakeTimeout)
+        wireGuard.address = values.9.stdout.split(whereSeparator: \.isWhitespace).dropFirst(2).first.map(String.init) ?? "—"
+        if let mtuRange = values.10.stdout.range(of: #"mtu\s+(\d+)"#, options: .regularExpression) { wireGuard.mtu = values.10.stdout[mtuRange].split(separator: " ").last.map(String.init) ?? "—" }
+        units = SystemctlParser.parse(values.11.stdout)
+        listeners = SSParser.parse(values.12.stdout)
+        antiZapretSettings = Dictionary(uniqueKeysWithValues: values.13.stdout.split(separator: "\n").compactMap { line in
+            let pair = line.split(separator: "=", maxSplits: 1).map(String.init); return pair.count == 2 ? (pair[0], pair[1]) : nil
+        })
+        profiles = ProfileParser.parseListing(values.14.stdout)
+        lastRefresh = Date(); statusMessage = values.0.succeeded ? "Updated" : "SSH unavailable"
+        if values.0.succeeded { await refreshHelper() }
+    }
+
+    func refreshHelper() async {
+        switch await helper.version(configuration: configuration) {
+        case .success(let version):
+            helperVersion = version; helperError = nil
+            backups = (try? await helper.listBackups(configuration: configuration)) ?? []
+            managedPeers = (try? await helper.peers(configuration: configuration)) ?? []
+        case .failure(let error):
+            helperVersion = nil; helperError = error
+        }
+    }
+
+    func suggestedPeerIP() -> String {
+        guard let address = wireGuard.address.split(separator: "/").first else { return "" }
+        let octets = address.split(separator: ".")
+        guard octets.count == 4 else { return "" }
+        let prefix = octets.prefix(3).joined(separator: ".")
+        let used = Set(managedPeers.map(\.ip) + wireGuard.peers.map { $0.vpnIP.replacingOccurrences(of: "/32", with: "") })
+        return (2...254).map { "\(prefix).\($0)" }.first { !used.contains($0) } ?? ""
+    }
+
+    func addPeer(name: String, ip: String, dns: String, mtu: Int, allowedIPs: String, endpoint: String) async -> Bool {
+        guard settings.writeModeEnabled, helperVersion == HelperService.localVersion else {
+            presentedError = AppError(title: "Write operation unavailable", message: "Write Mode and a matching server helper are required.", technicalDetails: "helper=\(helperVersion ?? "missing")", recommendedAction: "Enable Write Mode after installing helper version \(HelperService.localVersion).")
+            return false
+        }
+        do {
+            _ = try await helper.addPeer(name: name, ip: ip, dns: dns, mtu: mtu, allowedIPs: allowedIPs, endpoint: endpoint, configuration: configuration)
+            let config = try await ssh.fetchClientConfig(name: name, configuration: configuration)
+            _ = try ProfileStore.saveConfiguration(config, name: name)
+            localProfiles = ProfileStore.list()
+            await refresh()
+            return true
+        } catch {
+            presentedError = AppError(title: "WireGuard peer creation failed", message: "The peer was not created successfully. The helper performs rollback when validation fails.", technicalDetails: SecretRedactor.redact(error.localizedDescription), recommendedAction: "Review the safe log and verify wg0/helper health before retrying.")
+            return false
+        }
+    }
+
+    func removePeer(publicKey: String, deleteClient: Bool, allowExisting: Bool) async -> Bool {
+        guard settings.writeModeEnabled, helperVersion == HelperService.localVersion else { return false }
+        do {
+            _ = try await helper.removePeer(publicKey: publicKey, deleteClient: deleteClient, allowExisting: allowExisting, configuration: configuration)
+            await refresh(); return true
+        } catch {
+            presentedError = AppError(title: "WireGuard peer removal failed", message: "The peer could not be removed safely.", technicalDetails: SecretRedactor.redact(error.localizedDescription), recommendedAction: "Do not edit wg0.conf manually; inspect the backup and helper health output.")
+            return false
+        }
+    }
+
+    func performServiceAction(_ action: String, unit: String) async -> Bool {
+        guard settings.writeModeEnabled, helperVersion == HelperService.localVersion else { return false }
+        do {
+            let change = try await helper.service(action: action, unit: unit, configuration: configuration)
+            logs.insert(LogEntry(timestamp: Date(), subsystem: "System", command: "helper service \(action) \(unit)", stdout: "state=\(change.state) backup=\(change.backup)", stderr: "", exitCode: 0), at: 0)
+            await refresh()
+            return true
+        } catch {
+            presentedError = AppError(title: "Service action failed", message: "\(unit) could not be \(action)ed safely.", technicalDetails: SecretRedactor.redact(error.localizedDescription), recommendedAction: "Review the helper backup and service journal before retrying.")
+            return false
+        }
+    }
+
+    func testSSH() async -> Bool {
+        let result = await execute(.uname, subsystem: "SSH Test")
+        statusMessage = result.succeeded ? "SSH connection successful" : "SSH failed: \(result.stderr)"
+        return result.succeeded
+    }
+
+    func runDiagnostic(_ command: ReadCommand, name: String) async {
+        let result = await execute(command, subsystem: "Diagnostics")
+        let diagnostic = DiagnosticResult(id: UUID(), date: Date(), name: name, success: result.succeeded, summary: (result.stdout.nonEmpty ?? result.stderr).trimmingCharacters(in: .whitespacesAndNewlines), milliseconds: result.duration * 1000)
+        diagnostics.append(diagnostic); await history.append(diagnostic)
+    }
+
+    func execute(_ command: ReadCommand, subsystem: String) async -> CommandResult {
+        do {
+            let result = try await ssh.execute(command, configuration: configuration)
+            logs.insert(LogEntry(timestamp: Date(), subsystem: subsystem, command: command.rawValue, stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode), at: 0)
+            return result
+        } catch {
+            let message = SecretRedactor.redact(error.localizedDescription)
+            logs.insert(LogEntry(timestamp: Date(), subsystem: subsystem, command: command.rawValue, stdout: "", stderr: message, exitCode: -1), at: 0)
+            return CommandResult(stdout: "", stderr: message, exitCode: -1, duration: 0)
+        }
+    }
+
+    private func parseOS(_ value: String) -> String { value.split(separator: "\n").first(where: { $0.hasPrefix("PRETTY_NAME=") }).map { $0.replacingOccurrences(of: "PRETTY_NAME=", with: "").replacingOccurrences(of: "\"", with: "") } ?? "—" }
+    private func parseLoad(_ value: String) -> String { value.components(separatedBy: "load average:").last?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "—" }
+    private func parseMemory(_ value: String) -> Double { let line = value.split(separator: "\n").first { $0.hasPrefix("Mem:") }; let fields = line?.split(whereSeparator: \.isWhitespace) ?? []; guard fields.count > 2, let total = Double(fields[1]), let used = Double(fields[2]), total > 0 else { return 0 }; return used / total * 100 }
+    private func parseDisk(_ value: String) -> Double { let fields = value.split(separator: "\n").last?.split(whereSeparator: \.isWhitespace) ?? []; return Double(fields.first { $0.hasSuffix("%") }?.dropLast() ?? "0") ?? 0 }
+    private func parseCPU(_ value: String) -> Double {
+        let values = value.split(whereSeparator: \.isWhitespace).dropFirst().compactMap { Double($0) }
+        guard values.count >= 4 else { return system.cpuPercent }
+        let idle = values[3] + (values.count > 4 ? values[4] : 0)
+        let total = values.reduce(0, +)
+        defer { previousCPUTicks = (idle, total) }
+        guard let previousCPUTicks else { return 0 }
+        let totalDelta = total - previousCPUTicks.total
+        guard totalDelta > 0 else { return system.cpuPercent }
+        return max(0, min(100, (1 - (idle - previousCPUTicks.idle) / totalDelta) * 100))
+    }
+}
+
+enum SidebarSection: String, CaseIterable, Identifiable {
+    case dashboard = "Dashboard", wireGuard = "WireGuard", profiles = "Profiles", dns = "DNS & AdGuard", antiZapret = "AntiZapret", services = "Services", diagnostics = "Diagnostics", security = "Security", backups = "Backups", router = "Router", homeAccess = "Home Access", logs = "Logs", settings = "Settings"
+    var id: String { rawValue }
+    var icon: String {
+        switch self { case .dashboard: "gauge"; case .wireGuard: "network"; case .profiles: "doc.text"; case .antiZapret: "shield.lefthalf.filled"; case .dns: "server.rack"; case .services: "gearshape.2"; case .diagnostics: "stethoscope"; case .security: "lock.shield"; case .backups: "externaldrive.badge.timemachine"; case .router: "wifi.router"; case .homeAccess: "house"; case .logs: "list.bullet.rectangle"; case .settings: "gear" }
+    }
+}
+
+private extension String { var nonEmpty: String? { isEmpty ? nil : self } }

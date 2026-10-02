@@ -1,0 +1,401 @@
+#!/usr/bin/env python3
+"""TunnelDeck server helper. Fixed commands only; no arbitrary execution."""
+
+import argparse
+import base64
+import datetime as dt
+import hashlib
+import ipaddress
+import json
+import os
+import re
+import shutil
+import stat
+import subprocess
+import tempfile
+from pathlib import Path
+
+VERSION = "1.0.0"
+WG_CONFIG = Path("/etc/wireguard/wg0.conf")
+WG_INTERFACE = "wg0"
+BACKUP_ROOT = Path("/root/tunneldeck-backups")
+CLIENT_ROOT = Path("/root/tunneldeck-clients")
+METADATA_PATH = Path("/root/tunneldeck/peers.json")
+NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,48}$")
+WG_KEY_RE = re.compile(r"^[A-Za-z0-9+/]{43}=$")
+UNIT_RE = re.compile(r"^(wg-quick@wg0|antizapret|antizapret-update|wg-quick@antizapret|wg-quick@vpn|openvpn-server@antizapret-udp|openvpn-server@vpn-udp|AdGuardHome)(\.service|\.timer)?$")
+
+
+class HelperError(RuntimeError):
+    pass
+
+
+def run(arguments, *, input_text=None, check=True):
+    completed = subprocess.run(arguments, input=input_text, text=True, capture_output=True, timeout=30, check=False)
+    if check and completed.returncode != 0:
+        raise HelperError(f"{arguments[0]} failed: {completed.stderr.strip()}")
+    return completed
+
+
+def require_root():
+    if os.geteuid() != 0:
+        raise HelperError("helper must run as root")
+
+
+def validate_name(value):
+    if not NAME_RE.fullmatch(value):
+        raise HelperError("invalid peer name")
+    return value
+
+
+def validate_ip(value):
+    address = ipaddress.ip_address(value)
+    config = WG_CONFIG.read_text()
+    match = re.search(r"(?mi)^Address\s*=\s*([^,\s]+)", config)
+    if not match:
+        raise HelperError("wg0 Address is missing")
+    interface = ipaddress.ip_interface(match.group(1))
+    network = interface.network
+    if address not in network or address in (network.network_address, network.broadcast_address, interface.ip):
+        raise HelperError(f"peer IP must be a free host address in {network}")
+    return str(address)
+
+
+def validate_key(value):
+    if not WG_KEY_RE.fullmatch(value):
+        raise HelperError("invalid WireGuard key")
+    try:
+        if len(base64.b64decode(value, validate=True)) != 32:
+            raise ValueError
+    except ValueError as error:
+        raise HelperError("invalid WireGuard key") from error
+    return value
+
+
+def validate_allowed_ips(value):
+    networks = [str(ipaddress.ip_network(item.strip(), strict=False)) for item in value.split(",")]
+    if not networks or len(networks) > 8:
+        raise HelperError("invalid AllowedIPs")
+    return ", ".join(networks)
+
+
+def validate_endpoint(value):
+    match = re.fullmatch(r"([A-Za-z0-9.-]+):(\d{1,5})", value)
+    if not match or not 1 <= int(match.group(2)) <= 65535:
+        raise HelperError("invalid endpoint")
+    return value
+
+
+def load_metadata():
+    if not METADATA_PATH.exists():
+        return {}
+    data = json.loads(METADATA_PATH.read_text())
+    return data if isinstance(data, dict) else {}
+
+
+def atomic_write(path, content, mode=0o600):
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "w") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary_name, mode)
+        os.replace(temporary_name, path)
+        directory = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        if os.path.exists(temporary_name):
+            os.unlink(temporary_name)
+
+
+def command_output(arguments):
+    return run(arguments).stdout.strip()
+
+
+def snapshot_health():
+    interface = run(["systemctl", "is-active", "wg-quick@wg0"], check=False).stdout.strip()
+    address = command_output(["ip", "-j", "address", "show", "dev", WG_INTERFACE]) if run(["ip", "link", "show", WG_INTERFACE], check=False).returncode == 0 else "[]"
+    return {
+        "wg0": interface,
+        "addressPresent": bool(address.strip()),
+        "listenPort": command_output(["wg", "show", WG_INTERFACE, "listen-port"]) if interface == "active" else "",
+        "timestamp": dt.datetime.now(dt.timezone.utc).isoformat(),
+    }
+
+
+def create_backup(operation, files):
+    require_root()
+    safe_operation = validate_name(operation)
+    timestamp = dt.datetime.now().strftime("%Y-%m-%d_%H-%M-%S_%f")
+    destination = BACKUP_ROOT / f"{timestamp}_{safe_operation}"
+    destination.mkdir(parents=True, mode=0o700)
+    manifest = {"timestamp": dt.datetime.now(dt.timezone.utc).isoformat(), "operation": safe_operation, "hostname": command_output(["hostname"]), "tunnelDeckVersion": VERSION, "files": [], "preHealth": snapshot_health()}
+    for source in files:
+        source = Path(source)
+        if not source.exists():
+            continue
+        relative = source.as_posix().lstrip("/")
+        target = destination / relative
+        if source.is_dir():
+            shutil.copytree(source, target)
+            copied_files = [item for item in target.rglob("*") if item.is_file()]
+            for copied in copied_files:
+                digest = hashlib.sha256(copied.read_bytes()).hexdigest()
+                original_path = source / copied.relative_to(target)
+                manifest["files"].append({"path": str(original_path), "backupPath": str(copied.relative_to(destination)), "sha256": digest, "size": copied.stat().st_size})
+        else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+            digest = hashlib.sha256(target.read_bytes()).hexdigest()
+            manifest["files"].append({"path": str(source), "backupPath": str(target.relative_to(destination)), "sha256": digest, "size": target.stat().st_size})
+    (destination / "wg-show-dump.txt").write_text(run(["wg", "show", "all", "dump"], check=False).stdout)
+    (destination / "iptables-save.txt").write_text(run(["iptables-save"], check=False).stdout)
+    (destination / "ip-route.txt").write_text(run(["ip", "route"], check=False).stdout)
+    atomic_write(destination / "manifest.json", json.dumps(manifest, indent=2) + "\n")
+    return destination
+
+
+def validate_wg_config(path):
+    directory = Path(tempfile.mkdtemp(prefix="tunneldeck-wg-validate-"))
+    candidate = directory / "wg0.conf"
+    try:
+        shutil.copy2(path, candidate)
+        run(["wg-quick", "strip", str(candidate)])
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
+
+
+def sync_wg_config(path):
+    stripped = run(["wg-quick", "strip", str(path)]).stdout
+    directory = Path(tempfile.mkdtemp(prefix="tunneldeck-wg-sync-"))
+    temporary = directory / "wg0.conf"
+    try:
+        temporary.write_text(stripped)
+        run(["wg", "syncconf", WG_INTERFACE, str(temporary)])
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
+
+
+def peer_blocks(text):
+    parts = re.split(r"(?m)(?=^\[Peer\]\s*$)", text)
+    return parts[0], parts[1:]
+
+
+def block_public_key(block):
+    match = re.search(r"(?m)^PublicKey\s*=\s*(\S+)\s*$", block)
+    return match.group(1) if match else None
+
+
+def remove_managed_block_exact(text, public_key):
+    begin = f"\n# TunnelDeck BEGIN {public_key}\n"
+    end = f"# TunnelDeck END {public_key}\n"
+    start = text.find(begin)
+    if start < 0:
+        return None
+    finish = text.find(end, start + len(begin))
+    if finish < 0:
+        raise HelperError("managed peer end marker missing")
+    return text[:start] + text[finish + len(end):]
+
+
+def wg_list():
+    metadata = load_metadata()
+    dump = run(["wg", "show", WG_INTERFACE, "dump"]).stdout.splitlines()
+    peers = []
+    for row in dump[1:]:
+        fields = row.split("\t")
+        if len(fields) < 8:
+            continue
+        key = fields[0]
+        entry = metadata.get(key, {})
+        peers.append({"publicKey": key, "name": entry.get("name", "Existing"), "ip": fields[3].split(",")[0].removesuffix("/32"), "endpoint": fields[2], "latestHandshake": int(fields[4] or 0), "rx": int(fields[5] or 0), "tx": int(fields[6] or 0), "managedBy": entry.get("managedBy", "Existing"), "created": entry.get("created")})
+    return peers
+
+
+def wg_add_peer(args):
+    require_root()
+    name = validate_name(args.name)
+    peer_ip = validate_ip(args.ip)
+    dns = str(ipaddress.ip_address(args.dns))
+    allowed_ips = validate_allowed_ips(args.allowed_ips)
+    endpoint = validate_endpoint(args.endpoint)
+    if not 1280 <= args.mtu <= 1500:
+        raise HelperError("MTU must be 1280-1500")
+    if any(peer["ip"] == peer_ip for peer in wg_list()):
+        raise HelperError("peer IP already in use")
+    metadata = load_metadata()
+    original_metadata = METADATA_PATH.read_text() if METADATA_PATH.exists() else None
+    if any(entry.get("name") == name for entry in metadata.values()):
+        raise HelperError("peer name already exists")
+    backup = create_backup("wg-add-peer", [WG_CONFIG, METADATA_PATH])
+    original = WG_CONFIG.read_text()
+    private_key = command_output(["wg", "genkey"])
+    public_key = run(["wg", "pubkey"], input_text=private_key + "\n").stdout.strip()
+    preshared_key = command_output(["wg", "genpsk"])
+    server_public_key = command_output(["wg", "show", WG_INTERFACE, "public-key"])
+    block = f"\n# TunnelDeck BEGIN {public_key}\n# Name: {name}\n[Peer]\nPublicKey = {public_key}\nPresharedKey = {preshared_key}\nAllowedIPs = {peer_ip}/32\n# TunnelDeck END {public_key}\n"
+    candidate = original + block
+    descriptor, temporary_name = tempfile.mkstemp(prefix="wg0.", suffix=".conf", dir=WG_CONFIG.parent)
+    os.close(descriptor)
+    temporary = Path(temporary_name)
+    client_path = CLIENT_ROOT / f"{name}.conf"
+    try:
+        temporary.write_text(candidate)
+        os.chmod(temporary, 0o600)
+        validate_wg_config(temporary)
+        atomic_write(WG_CONFIG, candidate)
+        run(["wg", "set", WG_INTERFACE, "peer", public_key, "preshared-key", "/dev/stdin", "allowed-ips", f"{peer_ip}/32"], input_text=preshared_key + "\n")
+        metadata[public_key] = {"name": name, "ip": peer_ip, "created": dt.datetime.now(dt.timezone.utc).isoformat(), "managedBy": "TunnelDeck", "clientFile": str(client_path)}
+        atomic_write(METADATA_PATH, json.dumps(metadata, indent=2) + "\n")
+        client = f"[Interface]\nPrivateKey = {private_key}\nAddress = {peer_ip}/32\nDNS = {dns}\nMTU = {args.mtu}\n\n[Peer]\nPublicKey = {server_public_key}\nPresharedKey = {preshared_key}\nEndpoint = {endpoint}\nAllowedIPs = {allowed_ips}\nPersistentKeepalive = 25\n"
+        CLIENT_ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(CLIENT_ROOT, 0o700)
+        atomic_write(client_path, client)
+        if snapshot_health()["wg0"] != "active":
+            raise HelperError("wg0 health check failed")
+        return {"name": name, "ip": peer_ip, "publicKey": public_key, "clientPath": str(CLIENT_ROOT / f"{name}.conf"), "backup": str(backup)}
+    except Exception:
+        atomic_write(WG_CONFIG, original)
+        sync_wg_config(WG_CONFIG)
+        if original_metadata is None:
+            METADATA_PATH.unlink(missing_ok=True)
+        else:
+            atomic_write(METADATA_PATH, original_metadata)
+        client_path.unlink(missing_ok=True)
+        raise
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def wg_remove_peer(args):
+    require_root()
+    public_key = validate_key(args.public_key)
+    metadata = load_metadata()
+    original_metadata = METADATA_PATH.read_text() if METADATA_PATH.exists() else None
+    entry = metadata.get(public_key)
+    if not entry and not args.allow_existing:
+        raise HelperError("existing peer removal requires --allow-existing")
+    backup = create_backup("wg-remove-peer", [WG_CONFIG, METADATA_PATH] + ([entry["clientFile"]] if entry and entry.get("clientFile") else []))
+    original = WG_CONFIG.read_text()
+    original_client = None
+    client_path = Path(entry["clientFile"]) if entry and entry.get("clientFile") else None
+    if client_path and client_path.exists():
+        original_client = client_path.read_text()
+    candidate = remove_managed_block_exact(original, public_key)
+    if candidate is None:
+        prefix, blocks = peer_blocks(original)
+        kept = [block for block in blocks if block_public_key(block) != public_key]
+        if len(kept) == len(blocks):
+            raise HelperError("peer not found in wg0.conf")
+        candidate = prefix.rstrip() + "\n\n" + "".join(kept).lstrip()
+    temporary = Path(tempfile.mkstemp(prefix="wg0.", suffix=".conf", dir=WG_CONFIG.parent)[1])
+    try:
+        temporary.write_text(candidate)
+        os.chmod(temporary, 0o600)
+        validate_wg_config(temporary)
+        atomic_write(WG_CONFIG, candidate)
+        run(["wg", "set", WG_INTERFACE, "peer", public_key, "remove"])
+        if entry:
+            metadata.pop(public_key, None)
+            atomic_write(METADATA_PATH, json.dumps(metadata, indent=2) + "\n")
+            if args.delete_client and entry.get("clientFile"):
+                Path(entry["clientFile"]).unlink(missing_ok=True)
+        if snapshot_health()["wg0"] != "active":
+            raise HelperError("wg0 health check failed")
+        return {"publicKey": public_key, "backup": str(backup)}
+    except Exception:
+        atomic_write(WG_CONFIG, original)
+        sync_wg_config(WG_CONFIG)
+        if original_metadata is None:
+            METADATA_PATH.unlink(missing_ok=True)
+        else:
+            atomic_write(METADATA_PATH, original_metadata)
+        if client_path and original_client is not None:
+            atomic_write(client_path, original_client)
+        raise
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def list_backups():
+    result = []
+    if not BACKUP_ROOT.exists():
+        return result
+    for path in sorted(BACKUP_ROOT.iterdir(), reverse=True):
+        manifest = path / "manifest.json"
+        if manifest.exists():
+            data = json.loads(manifest.read_text())
+            data["path"] = str(path)
+            data["size"] = sum(item.stat().st_size for item in path.rglob("*") if item.is_file())
+            result.append(data)
+    return result
+
+
+def service_action(args):
+    require_root()
+    if not UNIT_RE.fullmatch(args.unit):
+        raise HelperError("unit not allowed")
+    if args.action not in ("start", "stop", "restart"):
+        raise HelperError("action not allowed")
+    if "wg0" in args.unit:
+        files = [WG_CONFIG, METADATA_PATH]
+    elif args.unit.startswith("AdGuardHome"):
+        files = [Path("/opt/AdGuardHome/AdGuardHome.yaml")]
+    elif "antizapret" in args.unit or args.unit == "wg-quick@vpn":
+        files = [Path("/root/antizapret/setup"), Path("/etc/wireguard/antizapret.conf"), Path("/etc/wireguard/vpn.conf")]
+    else:
+        files = []
+    backup = create_backup(f"service-{args.action}", files)
+    run(["systemctl", args.action, args.unit])
+    state = run(["systemctl", "is-active", args.unit], check=False).stdout.strip()
+    if args.action != "stop" and state != "active":
+        raise HelperError(f"{args.unit} did not become active")
+    return {"unit": args.unit, "action": args.action, "state": state, "backup": str(backup)}
+
+
+def parser():
+    root = argparse.ArgumentParser()
+    sub = root.add_subparsers(dest="command", required=True)
+    sub.add_parser("version")
+    sub.add_parser("status")
+    sub.add_parser("health")
+    backup = sub.add_parser("backup"); backup.add_argument("operation")
+    sub.add_parser("list-backups")
+    sub.add_parser("wg-list")
+    add = sub.add_parser("wg-add-peer")
+    add.add_argument("--name", required=True); add.add_argument("--ip", required=True); add.add_argument("--dns", default="1.1.1.1"); add.add_argument("--mtu", type=int, default=1380); add.add_argument("--allowed-ips", default="0.0.0.0/0"); add.add_argument("--endpoint", required=True)
+    remove = sub.add_parser("wg-remove-peer"); remove.add_argument("--public-key", required=True); remove.add_argument("--delete-client", action="store_true"); remove.add_argument("--allow-existing", action="store_true")
+    client = sub.add_parser("wg-client-config"); client.add_argument("--name", required=True)
+    service = sub.add_parser("service"); service.add_argument("action"); service.add_argument("unit")
+    return root
+
+
+def main():
+    args = parser().parse_args()
+    if args.command == "version": result = {"version": VERSION}
+    elif args.command in ("status", "health"): result = snapshot_health()
+    elif args.command == "backup": result = {"backup": str(create_backup(args.operation, [WG_CONFIG, METADATA_PATH]))}
+    elif args.command == "list-backups": result = list_backups()
+    elif args.command == "wg-list": result = wg_list()
+    elif args.command == "wg-add-peer": result = wg_add_peer(args)
+    elif args.command == "wg-remove-peer": result = wg_remove_peer(args)
+    elif args.command == "wg-client-config":
+        name = validate_name(args.name); path = CLIENT_ROOT / f"{name}.conf"
+        if not path.exists(): raise HelperError("client config not found")
+        print(path.read_text(), end=""); return
+    elif args.command == "service": result = service_action(args)
+    else: raise HelperError("unsupported command")
+    print(json.dumps(result, indent=2))
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (HelperError, ValueError, json.JSONDecodeError) as error:
+        print(json.dumps({"error": str(error)}))
+        raise SystemExit(2)

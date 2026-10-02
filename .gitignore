@@ -1,0 +1,12 @@
+.build/
+dist/
+.DS_Store
+xcuserdata/
+*.xcuserstate
+DerivedData/
+*.conf
+*.ovpn
+*.key
+*.pem
+__pycache__/
+*.pyc
