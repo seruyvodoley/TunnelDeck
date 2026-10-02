@@ -213,6 +213,29 @@ struct MonitoringRecordResult: Sendable {
     let newEvents: [MonitoringEvent]
 }
 
+struct PeerHistorySample: Identifiable, Codable, Sendable {
+    var nodeID: UUID = LegacyNodeIdentity.unassigned
+    let id: UUID
+    let timestamp: Date
+    let peerID: String
+    let name: String
+    let vpnIP: String
+    let status: HealthState
+    let receivedBytes: UInt64
+    let sentBytes: UInt64
+    let latestHandshake: Date?
+}
+
+struct AdGuardHistorySample: Identifiable, Codable, Sendable {
+    var nodeID: UUID = LegacyNodeIdentity.unassigned
+    let id: UUID
+    let timestamp: Date
+    let totalQueries: Int
+    let blockedQueries: Int
+    let blockedPercentage: Double
+    let averageProcessingTime: Double
+}
+
 struct DiagnosticResult: Identifiable, Codable, Sendable {
     let id: UUID
     let date: Date

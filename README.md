@@ -1,6 +1,18 @@
-# TunnelDeck 1.2.6
+# TunnelDeck 2.0.0
 
 > The `feature/tunneldeck-2.0` branch is an architecture preview. It preserves the 1.x dashboard and helper 1.2.1 compatibility while adding a local, read-only-first fleet operations layer.
+
+## TunnelDeck 2.0.0 release notes
+
+- Stable node-ID based multi-node domain and Fleet Overview.
+- Versioned SQLite persistence with idempotent imports for 1.x monitoring, events, alert settings, WireGuard peer history and AdGuard history.
+- Evidence-based read-only topology and Exposure Matrix.
+- Incident Center with recovery timelines, 24-hour metrics and dependent-service suppression during VPS outages.
+- Per-node local Alert Rules with thresholds, cooldown, acknowledgement, deduplication and recovery events.
+- Seven-day WireGuard peer status/handshake/RX/TX history with reset-safe traffic deltas.
+- Minute-rate AdGuard statistics history with reset-safe query and blocked-query deltas.
+- Non-secret configuration baselines and structural drift reporting.
+- Sanitized diagnostic support bundles with automated redaction checks.
 
 ## TunnelDeck 2.0 architecture preview
 
@@ -148,6 +160,24 @@ swift test
 ```
 
 `swift test` requires a full Xcode installation because the suite uses Swift Testing macros. The helper tests use system Python and never connect to a production server.
+
+## 1.2.9 WireGuard peer and AdGuard history
+
+- Monitoring now keeps seven-day, per-VPS history for every discovered clean-WireGuard peer: online/offline state, latest handshake and RX/TX counters.
+- The Monitoring screen summarizes per-peer traffic transferred inside the selected 1/6/24-hour window and shows the most recent handshake state without storing private or preshared keys.
+- AdGuard API statistics are sampled in the background at most once per minute when credentials are configured, with query count, blocked count, blocked percentage and average processing time retained locally.
+- AdGuard history shows query/blocked deltas and blocked-percentage trends over the same monitoring window.
+- Counter-reset-safe analytics avoid negative traffic/query deltas after service or interface restarts.
+- All telemetry remains local on the Mac; server helper stays at 1.2.1 and no VPS/router configuration is changed.
+
+## 1.2.8 Incident Center and alert rules
+
+- Monitoring events are grouped into incidents with active/recovered state, duration, affected component timeline, 24-hour incident count, VPS downtime and mean recovery time.
+- Dependent service noise remains suppressed while the VPS itself is unavailable; a VPS outage is represented as one connectivity incident instead of multiple false service incidents.
+- Local alert rules control notifications for VPS, WireGuard, AdGuard/AntiZapret, public DNS exposure, new public listeners, disk usage and ping latency.
+- Disk and ping rules support configurable thresholds; all rules use cooldowns to avoid repeated notifications while recovery notifications remain immediate.
+- Alert configuration is stored locally per VPS and does not change server, helper, firewall or router configuration.
+- Server helper compatibility remains 1.2.1.
 
 ## 1.2.6 Monitoring history and event log
 

@@ -14,7 +14,7 @@ enum ExposureClassification: String, Codable, Sendable, CaseIterable { case publ
 enum IncidentSeverity: String, Codable, Sendable { case info, warning, critical }
 enum IncidentRecoveryState: String, Codable, Sendable { case active, recovered, acknowledged }
 enum DriftChangeKind: String, Codable, Sendable { case added, removed, changed }
-enum AlertRuleKind: String, Codable, Sendable, CaseIterable { case nodeOffline, serviceOffline, disk, memory, ping, publicDNS, newPublicListener, peerInactive, configurationDrift }
+enum AlertRuleKind: String, Codable, Sendable, CaseIterable { case nodeOffline, wireGuardOffline, adGuardOffline, antiZapretOffline, disk, memory, ping, publicDNS, newPublicListener, peerInactive, configurationDrift }
 
 struct InfrastructureNode: Identifiable, Codable, Sendable, Hashable {
     let id: UUID

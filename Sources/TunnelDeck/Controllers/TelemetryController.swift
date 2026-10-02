@@ -1,0 +1,19 @@
+import Foundation
+
+enum PeerHistoryAnalytics { static func trafficDelta(points:[PeerHistorySample])->UInt64{let p=points.sorted{$0.timestamp<$1.timestamp};guard p.count>1 else{return 0};return zip(p,p.dropFirst()).reduce(0){$0+delta($1.0.receivedBytes,$1.1.receivedBytes)+delta($1.0.sentBytes,$1.1.sentBytes)}};private static func delta(_ a:UInt64,_ b:UInt64)->UInt64{b>=a ? b-a:b} }
+enum AdGuardHistoryAnalytics { static func queryDelta(_ p:[AdGuardHistorySample])->Int{delta(p.sorted{$0.timestamp<$1.timestamp}.map(\.totalQueries))};static func blockedDelta(_ p:[AdGuardHistorySample])->Int{delta(p.sorted{$0.timestamp<$1.timestamp}.map(\.blockedQueries))};private static func delta(_ v:[Int])->Int{guard v.count>1 else{return 0};return zip(v,v.dropFirst()).reduce(0){$0+($1.1 >= $1.0 ? $1.1-$1.0:$1.1)}} }
+
+actor LegacyTelemetryImporter {
+    private let folder:URL
+    init(folder:URL?=nil){self.folder=folder ?? FileManager.default.urls(for:.applicationSupportDirectory,in:.userDomainMask)[0].appendingPathComponent("TunnelDeck/Telemetry",isDirectory:true)}
+    func importHistory(for node:InfrastructureNode,into store:InfrastructureStore)async throws{let key=LegacyMonitoringImporter.hostKey(node.host);let decoder=JSONDecoder();if let data=try? Data(contentsOf:folder.appendingPathComponent("peers-\(key).json")),let values=try? decoder.decode([LegacyPeer].self,from:data){for value in values{try await store.insert(peer:value.sample(node.id))}};if let data=try? Data(contentsOf:folder.appendingPathComponent("adguard-\(key).json")),let values=try? decoder.decode([LegacyAdGuard].self,from:data){for value in values{try await store.insert(adGuard:value.sample(node.id))}}}
+    private struct LegacyPeer:Decodable{let id:UUID;let timestamp:Date;let peerID:String;let name:String;let vpnIP:String;let status:HealthState;let receivedBytes:UInt64;let sentBytes:UInt64;let latestHandshake:Date?;func sample(_ n:UUID)->PeerHistorySample{PeerHistorySample(nodeID:n,id:id,timestamp:timestamp,peerID:peerID,name:name,vpnIP:vpnIP,status:status,receivedBytes:receivedBytes,sentBytes:sentBytes,latestHandshake:latestHandshake)}}
+    private struct LegacyAdGuard:Decodable{let id:UUID;let timestamp:Date;let totalQueries:Int;let blockedQueries:Int;let blockedPercentage:Double;let averageProcessingTime:Double;func sample(_ n:UUID)->AdGuardHistorySample{AdGuardHistorySample(nodeID:n,id:id,timestamp:timestamp,totalQueries:totalQueries,blockedQueries:blockedQueries,blockedPercentage:blockedPercentage,averageProcessingTime:averageProcessingTime)}}
+}
+
+actor LegacyAlertImporter {
+    private let folder:URL
+    init(folder:URL?=nil){self.folder=folder ?? FileManager.default.urls(for:.applicationSupportDirectory,in:.userDomainMask)[0].appendingPathComponent("TunnelDeck/Alerts",isDirectory:true)}
+    func rules(for node:InfrastructureNode)throws->[AlertRule]{let url=folder.appendingPathComponent("rules-\(LegacyMonitoringImporter.hostKey(node.host)).json");guard let data=try? Data(contentsOf:url),let old=try? JSONDecoder().decode([LegacyRule].self,from:data)else{return []};return old.compactMap{$0.convert(node.id)}}
+    private struct LegacyRule:Decodable{let kind:String;let enabled:Bool;let threshold:Double?;let cooldownMinutes:Int;func convert(_ nodeID:UUID)->AlertRule?{let mapped:AlertRuleKind;switch kind{case"vpsOffline":mapped = .nodeOffline;case"wireGuardOffline":mapped = .wireGuardOffline;case"serviceOffline":mapped = .adGuardOffline;case"publicDNS":mapped = .publicDNS;case"newPublicListener":mapped = .newPublicListener;case"diskPercent":mapped = .disk;case"pingMilliseconds":mapped = .ping;default:return nil};return AlertRule(id:AlertEngine.stableID(nodeID,mapped.rawValue),nodeID:nodeID,kind:mapped,enabled:enabled,threshold:threshold,severity:[AlertRuleKind.nodeOffline,.wireGuardOffline,.publicDNS,.newPublicListener].contains(mapped) ? .critical:.warning,cooldown:TimeInterval(cooldownMinutes*60),muteUntil:nil,acknowledgedAt:nil)}}
+}

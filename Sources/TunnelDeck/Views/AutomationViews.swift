@@ -23,6 +23,22 @@ struct MonitoringView: View {
         return model.monitoringSamples.filter { $0.timestamp >= cutoff }
     }
 
+    private var historyCutoff: Date {
+        Date().addingTimeInterval(-Double(model.monitoringWindowHours) * 3600)
+    }
+
+    private var peerIDsInWindow: [String] {
+        Array(Set(model.peerHistory.filter { $0.timestamp >= historyCutoff }.map(\.peerID))).sorted()
+    }
+
+    private func peerPoints(_ peerID: String) -> [PeerHistorySample] {
+        model.peerHistory.filter { $0.peerID == peerID && $0.timestamp >= historyCutoff }.sorted { $0.timestamp < $1.timestamp }
+    }
+
+    private var filteredAdGuardHistory: [AdGuardHistorySample] {
+        model.adGuardHistory.filter { $0.timestamp >= historyCutoff }.sorted { $0.timestamp < $1.timestamp }
+    }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
@@ -103,6 +119,59 @@ struct MonitoringView: View {
                     }
                 }
 
+                MetricCard(title: "WireGuard peer history", icon: "point.3.connected.trianglepath.dotted") {
+                    VStack(alignment: .leading, spacing: 10) {
+                        if peerIDsInWindow.isEmpty {
+                            Text("No peer history in this window yet.").foregroundStyle(.secondary)
+                        } else {
+                            ForEach(peerIDsInWindow, id: \.self) { peerID in
+                                let points = peerPoints(peerID)
+                                if let latest = points.last {
+                                    HStack(alignment: .top, spacing: 10) {
+                                        StatusDot(state: latest.status)
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text(latest.vpnIP == "—" ? latest.name : latest.vpnIP).fontWeight(.semibold)
+                                            Text("Last handshake: \(latest.latestHandshake?.formatted(.relative(presentation: .numeric)) ?? "never")")
+                                                .font(.caption).foregroundStyle(.secondary)
+                                        }
+                                        Spacer()
+                                        VStack(alignment: .trailing, spacing: 2) {
+                                            Text(PeerHistoryAnalytics.trafficDelta(points: points).byteString)
+                                                .font(.system(.body, design: .monospaced))
+                                            Text("traffic in window").font(.caption).foregroundStyle(.secondary)
+                                        }
+                                    }
+                                    Divider()
+                                }
+                            }
+                        }
+                    }
+                }
+
+                MetricCard(title: "AdGuard history", icon: "shield.checkered") {
+                    VStack(alignment: .leading, spacing: 12) {
+                        if filteredAdGuardHistory.isEmpty {
+                            Text("No AdGuard API history in this window yet. When credentials are configured, TunnelDeck samples it at most once per minute.")
+                                .foregroundStyle(.secondary)
+                        } else {
+                            HStack(spacing: 24) {
+                                incidentMetric("Queries", String(AdGuardHistoryAnalytics.queryDelta(filteredAdGuardHistory)))
+                                incidentMetric("Blocked", String(AdGuardHistoryAnalytics.blockedDelta(filteredAdGuardHistory)))
+                                incidentMetric("Blocked %", String(format: "%.1f%%", filteredAdGuardHistory.last?.blockedPercentage ?? 0))
+                                incidentMetric("Avg processing", String(format: "%.2f ms", (filteredAdGuardHistory.last?.averageProcessingTime ?? 0) * 1000))
+                            }
+                            Chart(filteredAdGuardHistory) { sample in
+                                LineMark(
+                                    x: .value("Time", sample.timestamp),
+                                    y: .value("Blocked %", sample.blockedPercentage)
+                                )
+                            }
+                            .chartYScale(domain: 0...100)
+                            .frame(height: 170)
+                        }
+                    }
+                }
+
                 MetricCard(title: "Event log", icon: "clock.arrow.circlepath") {
                     VStack(alignment: .leading, spacing: 10) {
                         if model.monitoringEvents.isEmpty {
@@ -146,7 +215,6 @@ struct MonitoringView: View {
     }
 
     private var latestSample: MonitoringSample? { model.monitoringSamples.last }
-
     private func serviceCard(_ title: String, component: String, state: HealthState) -> some View {
         MetricCard(title: title, icon: "circle.grid.2x2") {
             VStack(alignment: .leading, spacing: 7) {
@@ -180,6 +248,8 @@ struct MonitoringView: View {
         if hours > 0 { return "\(hours)h \(minutes)m" }
         return "\(minutes)m"
     }
+
+    private func incidentMetric(_ title: String, _ value: String) -> some View { VStack(alignment: .leading, spacing: 2) { Text(title).font(.caption).foregroundStyle(.secondary); Text(value).font(.title3.bold()).monospacedDigit() } }
 
     private func averageMetric(_ title: String, _ values: [Double], suffix: String = "%") -> some View {
         VStack(alignment: .leading, spacing: 2) {
