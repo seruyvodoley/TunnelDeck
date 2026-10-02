@@ -35,6 +35,8 @@ struct SystemSnapshot: Sendable {
 }
 
 struct WireGuardPeer: Identifiable, Sendable, Hashable {
+    var nodeID: UUID = LegacyNodeIdentity.unassigned
+    var interfaceID: UUID? = nil
     let id: String
     var name: String
     var vpnIP: String
@@ -176,6 +178,7 @@ struct LogEntry: Identifiable, Sendable {
 }
 
 struct MonitoringSample: Identifiable, Codable, Sendable {
+    var nodeID: UUID = LegacyNodeIdentity.unassigned
     let id: UUID
     let timestamp: Date
     let cpuPercent: Double
