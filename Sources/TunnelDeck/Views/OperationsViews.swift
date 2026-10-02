@@ -42,7 +42,7 @@ struct ServicesView: View {
             Text("TunnelDeck will create a scoped backup, \(state.action) \(state.unit), and verify its resulting state. Network services may briefly disconnect.")
         }
     }
-    private func canWrite(_ unit: UnitStatus) -> Bool { model.settings.writeModeEnabled && model.helperVersion == HelperService.localVersion && unit.activeState != "not-found" }
+    private func canWrite(_ unit: UnitStatus) -> Bool { model.settings.writeModeEnabled && model.helperVersion == HelperService.localVersion && unit.activeState != "not-found" && !unit.name.hasSuffix(".timer") }
 }
 
 struct SecurityView: View {
