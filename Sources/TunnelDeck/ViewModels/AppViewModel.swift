@@ -40,6 +40,7 @@ final class AppViewModel: ObservableObject {
     @Published var isRefreshingSecurity = false
     @Published var monitoringSamples: [MonitoringSample] = []
     @Published var monitoringEvents: [MonitoringEvent] = []
+    @Published var monitoringWindowHours = 6
 
     let ssh = SSHService()
     let adGuardAPI = AdGuardAPIService()
