@@ -1,4 +1,4 @@
-# TunnelDeck 1.2.1
+# TunnelDeck 1.2.2
 
 Native macOS control panel for a self-hosted WireGuard, AntiZapret and AdGuard Home VPS. Built with Swift, SwiftUI and the system OpenSSH client—no Electron, embedded terminal, passwords or private keys in the app bundle.
 
@@ -136,6 +136,15 @@ swift test
 ```
 
 `swift test` requires a full Xcode installation because the suite uses Swift Testing macros. The helper tests use system Python and never connect to a production server.
+
+## 1.2.2 functional-correctness fixes
+
+- Doctor builds each report from fresh command results instead of cached dashboard state.
+- Health distinguishes **Critical** infrastructure/security problems from an actually **Offline** VPS.
+- Public listeners include wildcard binds and services bound directly to the configured public VPS address.
+- AdGuard Home web/API endpoint is discovered from the live AdGuard listener instead of assuming port 3000.
+- AdGuard login validates credentials before closing the login sheet and reports authentication versus connectivity failures.
+- The macOS app expects the deployed server helper version 1.2.1.
 
 ## Known limitations
 
