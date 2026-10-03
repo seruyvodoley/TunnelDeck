@@ -10,6 +10,32 @@ spec = importlib.util.spec_from_file_location("tunneldeck_agent", PATH); agent =
 
 
 class AgentTests(unittest.TestCase):
+    def test_wireguard_interfaces_are_generic(self):
+        dump = "vpn\tprivate-hidden\tpublic\t51820\toff\nantizapret\tprivate-hidden\tpublic\t51821\toff\nvpn\tpeer-public\tpsk-hidden\tendpoint\t10.0.0.2/32\t10\t20\t30\t0"
+        interfaces, peers, state = agent.wireguard_snapshot(dump, True)
+        self.assertEqual(interfaces, ["antizapret", "vpn"]); self.assertEqual(state, "online"); self.assertEqual(peers[0]["interface"], "vpn")
+        self.assertEqual(agent.wireguard_snapshot("wg0\tprivate-hidden\tpublic\t51820\toff", True)[2], "online")
+        self.assertEqual(agent.wireguard_snapshot("", True)[2], "unknown")
+        self.assertEqual(agent.wireguard_snapshot("", False, True)[2], "unknown")
+
+    def test_wireguard_expected_but_down_is_offline(self):
+        self.assertEqual(agent.wireguard_snapshot("", True, configured=True)[2], "offline")
+
+    def test_cpu_busy_percentage(self):
+        self.assertEqual(agent.cpu_busy_percent("cpu  10 0 10 80 0 0 0 0", "cpu  20 0 20 100 0 0 0 0"), 50.0)
+
+    def test_public_dns_exposure(self):
+        self.assertTrue(agent.public_dns_exposed("udp UNCONN 0 0 0.0.0.0:53 0.0.0.0:*"))
+        self.assertTrue(agent.public_dns_exposed("tcp LISTEN 0 10 [::]:53 [::]:*"))
+        self.assertFalse(agent.public_dns_exposed("udp UNCONN 0 0 127.0.0.1:53 0.0.0.0:*"))
+        self.assertFalse(agent.public_dns_exposed("udp UNCONN 0 0 10.29.0.1:53 0.0.0.0:*"))
+        self.assertFalse(agent.public_dns_exposed("udp UNCONN 0 0 127.1.1.1:53 0.0.0.0:*\ntcp LISTEN 0 10 127.2.2.2:53 0.0.0.0:*"))
+
+    def test_optional_service_state(self):
+        self.assertEqual(agent.unit_state("not-found", "inactive"), "unknown")
+        self.assertEqual(agent.unit_state("loaded", "active"), "online")
+        self.assertEqual(agent.unit_state("loaded", "failed"), "offline")
+
     def test_incremental_cursor_restart_retention_and_transitions(self):
         with tempfile.TemporaryDirectory() as directory:
             path = pathlib.Path(directory) / "telemetry.sqlite3"; db = agent.TelemetryDB(path)

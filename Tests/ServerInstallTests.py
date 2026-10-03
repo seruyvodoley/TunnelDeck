@@ -36,6 +36,11 @@ class FakeSystem:
         return Result(0,"success\n" if "--property=Result" in args else "")
 
 class InstallerTests(unittest.TestCase):
+    def test_agent_unit_bounds_sudo_transition_and_read_evidence_capabilities(self):
+        unit=(ROOT/"ServerAgent"/"tunneldeck-agent.service").read_text()
+        self.assertIn("CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_AUDIT_WRITE CAP_NET_ADMIN",unit)
+        self.assertNotIn("AmbientCapabilities=CAP_NET_ADMIN",unit)
+
     def make(self,system=None):
         temporary=tempfile.TemporaryDirectory();self.addCleanup(temporary.cleanup)
         return installer.Installer(ROOT,temporary.name,system or FakeSystem()),pathlib.Path(temporary.name)

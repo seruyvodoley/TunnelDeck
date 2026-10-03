@@ -15,7 +15,9 @@ PrivateTmp=true
 PrivateDevices=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 ReadWritePaths=/var/lib/tunneldeck
-CapabilityBoundingSet=
+# The agent itself stays unprivileged. SETUID/SETGID/AUDIT_WRITE let sudo cross
+# the exact collector allowlist; NET_ADMIN lets only those root children read netlink.
+CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_AUDIT_WRITE CAP_NET_ADMIN
 LockPersonality=true
 MemoryDenyWriteExecute=true
 

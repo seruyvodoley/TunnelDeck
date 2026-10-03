@@ -4,11 +4,13 @@
 import argparse
 import datetime as dt
 import hashlib
+import ipaddress
 import json
 import os
 import re
 import sqlite3
 import subprocess
+import time
 from pathlib import Path
 
 VERSION = "2.0.0"
@@ -137,26 +139,99 @@ def command(arguments):
     return result.stdout.strip() if result.returncode == 0 else ""
 
 
-def collect_snapshot():
-    services = {}
-    units = ["wg-quick@wg0.service", "AdGuardHome.service", "antizapret.service"]
-    for unit in units:
-        services[unit] = command(["systemctl", "is-active", unit]) or "unknown"
-    peers = []
-    for line in command(["sudo", "-n", "/usr/bin/wg", "show", "all", "dump"]).splitlines():
+def command_result(arguments):
+    result = subprocess.run(arguments, text=True, capture_output=True, timeout=15, check=False)
+    return result.returncode == 0, result.stdout.strip()
+
+
+def cpu_busy_percent(first=None, second=None, delay=0.15):
+    def read_stat():
+        with open("/proc/stat", "r", encoding="ascii") as handle:
+            return handle.readline()
+    def ticks(line):
+        values = [int(value) for value in line.split()[1:]]
+        idle = values[3] + (values[4] if len(values) > 4 else 0)
+        return idle, sum(values)
+    try:
+        before = ticks(first or read_stat())
+        if second is None:
+            time.sleep(delay)
+        after = ticks(second or read_stat())
+        total_delta = after[1] - before[1]
+        if total_delta <= 0:
+            return 0.0
+        return round(max(0.0, min(100.0, (1 - (after[0] - before[0]) / total_delta) * 100)), 2)
+    except (OSError, ValueError, IndexError):
+        return 0.0
+
+
+def wireguard_snapshot(text, succeeded, configured=False):
+    if not succeeded:
+        return [], [], "unknown"
+    interfaces, peers = set(), []
+    for line in text.splitlines():
         fields = line.split("\t")
+        if not fields or not fields[0]:
+            continue
+        interfaces.add(fields[0])
         if len(fields) >= 9:
-            peers.append({"publicIdentifier": fields[1], "latestHandshake": int(fields[5] or 0), "rx": int(fields[6] or 0), "tx": int(fields[7] or 0)})
+            try:
+                peers.append({"interface": fields[0], "publicIdentifier": fields[1], "latestHandshake": int(fields[5] or 0), "rx": int(fields[6] or 0), "tx": int(fields[7] or 0)})
+            except ValueError:
+                continue
+    names = sorted(interfaces)
+    return names, peers, "online" if names else "offline" if configured else "unknown"
+
+
+def service_state(unit):
+    succeeded, output = command_result(["systemctl", "show", unit, "--property=LoadState", "--property=ActiveState"])
+    if not succeeded:
+        return "unknown"
+    properties = dict(line.split("=", 1) for line in output.splitlines() if "=" in line)
+    return unit_state(properties.get("LoadState"), properties.get("ActiveState"))
+
+
+def unit_state(load_state, active_state):
+    if load_state in {None, "not-found", "masked"}:
+        return "unknown"
+    return state_value(active_state or "unknown")
+
+
+def public_dns_exposed(text):
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) < 5:
+            continue
+        address = parts[4]
+        host, separator, port = address.rpartition(":")
+        if not separator or port != "53":
+            continue
+        host = host.strip("[]").split("%", 1)[0]
+        if host in {"", "*", "0.0.0.0", "::"}:
+            return True
+        try:
+            if ipaddress.ip_address(host).is_global:
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def collect_snapshot():
+    services = {unit: service_state(unit) for unit in ("AdGuardHome.service", "antizapret.service")}
+    wg_ok, wg_dump = command_result(["sudo", "-n", "/usr/bin/wg", "show", "all", "dump"])
+    configured = bool(command(["systemctl", "list-unit-files", "wg-quick@*.service", "--no-legend", "--no-pager"]))
+    interfaces, peers, wireguard_state = wireguard_snapshot(wg_dump, wg_ok, configured)
     memory_text = command(["free", "-b"]); disk_text = command(["df", "-P", "-B1", "/"])
     memory = memory_percent(memory_text); disk = disk_percent(disk_text)
     listeners = command(["ss", "-H", "-lntu"])
     return sanitized({
-        "cpuPercent": 0.0, "memoryPercent": memory, "diskPercent": disk, "pingMilliseconds": None,
-        "vpsState": "online", "wireGuardState": state_value(services.get("wg-quick@wg0.service")), "adGuardState": state_value(services.get("AdGuardHome.service")), "antiZapretState": state_value(services.get("antizapret.service")),
-        "publicDNSExposed": False, "publicListeners": listener_keys(listeners),
+        "cpuPercent": cpu_busy_percent(), "memoryPercent": memory, "diskPercent": disk, "pingMilliseconds": None,
+        "vpsState": "online", "wireGuardState": wireguard_state, "adGuardState": services["AdGuardHome.service"], "antiZapretState": services["antizapret.service"],
+        "publicDNSExposed": public_dns_exposed(listeners), "publicListeners": listener_keys(listeners),
         "system": {"uptime": command(["uptime", "-p"]), "load": command(["cat", "/proc/loadavg"]), "memory": memory_text, "disk": disk_text, "kernel": command(["uname", "-sr"])},
         "network": {"interfaces": command(["ip", "-j", "address"]), "routes": command(["ip", "-j", "route"]), "listeners": listeners, "firewallEvidence": command(["sudo", "-n", "/usr/sbin/nft", "list", "ruleset"])},
-        "wireguard": {"peers": peers}, "services": services,
+        "wireguard": {"interfaces": interfaces, "peers": peers}, "services": services,
         "security": {"sshPolicy": ssh_policy(), "configurationHashes": safe_hashes()},
     })
 
@@ -174,7 +249,7 @@ def listener_keys(text):
 
 
 def safe_hashes():
-    paths = [Path("/etc/wireguard/wg0.conf"), Path("/opt/AdGuardHome/AdGuardHome.yaml")]
+    paths = [Path("/opt/AdGuardHome/AdGuardHome.yaml")]
     hashes = {}
     for path in paths:
         output = command(["sudo", "-n", "/usr/bin/sha256sum", str(path)])
