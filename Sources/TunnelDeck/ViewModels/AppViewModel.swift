@@ -72,6 +72,8 @@ final class AppViewModel: ObservableObject {
     private var lastAdGuardHistorySample: Date?
     private var lifecycleObservers: [NSObjectProtocol] = []
     private var wakeTask: Task<Void, Never>?
+    private var agentSyncTask: Task<Void, Never>?
+    private var lastAgentSyncAttempt: Date?
     private var isMacSleeping = false
     private var previousCPUTicks: (idle: Double, total: Double)?
 
@@ -204,6 +206,7 @@ final class AppViewModel: ObservableObject {
         if values.0.succeeded { await refreshHelper(); await sampleAdGuardHistoryIfNeeded() }
         await recordMonitoringState()
         await performScheduledBackupIfNeeded()
+        scheduleRegularAgentSync()
     }
 
     func refreshHelper() async {
@@ -611,12 +614,21 @@ final class AppViewModel: ObservableObject {
 
     private func rebuildIncidents(evaluateRules:Bool=true) { guard let nodeID = activeServerID else { incidents = []; return }; incidents = IncidentEngine.incidents(events: monitoringEvents, nodeID: nodeID); if evaluateRules{evaluateAlerts()}; updateFleet() }
 
-    private func syncAgentHistory() async {
+    private func scheduleRegularAgentSync(){guard agentSyncTask==nil,lastAgentSyncAttempt.map({Date().timeIntervalSince($0)>=60}) ?? true else{return};Task{await syncAgentHistory(force:false)}}
+
+    private func syncAgentHistory(force:Bool=true) async {
+        if let agentSyncTask{await agentSyncTask.value;return}
+        guard force || lastAgentSyncAttempt.map({Date().timeIntervalSince($0)>=60}) ?? true else{return}
         guard let nodeID=activeServerID,let persistenceStore else{return}
-        let key="agentCursors-\(nodeID.uuidString)";let cursors=UserDefaults.standard.data(forKey:key).flatMap{try? JSONDecoder().decode(AgentSyncCursors.self,from:$0)} ?? AgentSyncCursors()
-        guard let result=try? await agentSyncController.synchronize(nodeID:nodeID,cursors:cursors,service:agent,configuration:configuration,store:persistenceStore) else{return}
-        if let data=try? JSONEncoder().encode(result.cursors){UserDefaults.standard.set(data,forKey:key)}
-        if result.imported>0{statusMessage="Imported \(result.imported) server observations"}
+        lastAgentSyncAttempt=Date()
+        let configuration=self.configuration,service=agent,controller=agentSyncController
+        let cursors=(try? await persistenceStore.agentSyncCursors(nodeID:nodeID)) ?? AgentSyncCursors()
+        let task=Task{[weak self] in
+            guard let self else{return}
+            let result=try? await controller.synchronize(nodeID:nodeID,cursors:cursors,service:service,configuration:configuration,store:persistenceStore)
+            if let result,result.imported>0{self.statusMessage="Imported \(result.imported) server observations"}
+        }
+        agentSyncTask=task;await task.value;agentSyncTask=nil
     }
 
     var activeNodeName: String { servers.first(where: { $0.id == activeServerID })?.name ?? (system.hostname == "—" ? "VPS" : system.hostname) }

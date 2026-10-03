@@ -6,6 +6,14 @@ The default database is `/var/lib/tunneldeck/telemetry.sqlite3`, owned by the de
 
 The versioned JSON commands are `agent-version`, `agent-status`, `telemetry-summary`, `telemetry-latest`, `telemetry-samples`, `telemetry-events`, `telemetry-peers`, and `telemetry-adguard`. History commands accept `--since`, `--until`, `--limit`, and incremental `--cursor`.
 
+## Cursor contract
+
+Each stream uses its SQLite `rowid` as a strictly increasing cursor. A request returns rows where `rowid > cursor`, ordered by `rowid`; `nextCursor` is the last row actually returned. The next request therefore neither repeats nor skips a successful page. An empty page ends catch-up. A non-empty page with an unchanged or decreasing cursor is rejected by the app.
+
+TunnelDeck persists every decoded page before checkpointing that stream's cursor. A malformed page, cancellation, transport error, or local persistence error leaves its cursor at the preceding completed page. A replay is safe because local tables use stable IDs with `INSERT OR IGNORE`. Samples, events, peers, and AdGuard statistics have independent cursors.
+
+The app requests 2,000 rows per page and bounds one synchronization to 16 pages and 25,000 records per stream. If the cap is reached, completed progress remains checkpointed and the next synchronization resumes from that cursor. Launch and wake run immediate catch-up; normal operation schedules at most one catch-up approximately once per minute, independently of faster live polling.
+
 The systemd timer runs once per minute with no ambient capabilities, a read-only system, protected homes, private temporary/device namespaces, and only `/var/lib/tunneldeck` writable. Four exact sudoers commands provide WireGuard dump, nftables evidence, and two configuration hashes; they cannot mutate configuration or read raw config contents into the database. This narrow sudo boundary is why `NoNewPrivileges` cannot be enabled for the agent service; replacing it with a dedicated read broker is a future hardening option.
 
 Nothing is installed automatically. Deployment requires a separately approved `--apply` invocation.

@@ -36,7 +36,7 @@ enum AgentReadCommand: Sendable {
     }
 }
 
-actor AgentService {
+actor AgentService: AgentHistorySource {
     private let ssh: SSHService
     init(ssh: SSHService) { self.ssh = ssh }
 
@@ -46,13 +46,13 @@ actor AgentService {
         return try JSONDecoder().decode(AgentStatus.self, from: Data(result.stdout.utf8))
     }
 
-    func samples(cursor: Int64, configuration: SSHConfiguration) async throws -> AgentEnvelope<AgentTelemetryItem<AgentMonitoringPayload>> {
-        let result = try await ssh.executeAgent(.history(kind:"samples",cursor: cursor, limit: 2_000), configuration: configuration)
+    func samples(cursor: Int64, limit:Int, configuration: SSHConfiguration) async throws -> AgentEnvelope<AgentTelemetryItem<AgentMonitoringPayload>> {
+        let result = try await ssh.executeAgent(.history(kind:"samples",cursor: cursor, limit: limit), configuration: configuration)
         guard result.succeeded else { throw NSError(domain: "TunnelDeck.Agent", code: Int(result.exitCode), userInfo: [NSLocalizedDescriptionKey: result.stderr]) }
         return try JSONDecoder().decode(AgentEnvelope<AgentTelemetryItem<AgentMonitoringPayload>>.self, from: Data(result.stdout.utf8))
     }
-    func events(cursor:Int64,configuration:SSHConfiguration)async throws->AgentEnvelope<AgentTelemetryItem<AgentEventPayload>>{try await history("events",cursor,configuration)}
-    func peers(cursor:Int64,configuration:SSHConfiguration)async throws->AgentEnvelope<AgentTelemetryItem<AgentPeerPayload>>{try await history("peers",cursor,configuration)}
-    func adGuard(cursor:Int64,configuration:SSHConfiguration)async throws->AgentEnvelope<AgentTelemetryItem<AgentAdGuardPayload>>{try await history("adguard",cursor,configuration)}
-    private func history<T:Decodable & Sendable>(_ kind:String,_ cursor:Int64,_ configuration:SSHConfiguration)async throws->AgentEnvelope<AgentTelemetryItem<T>>{guard ["events","peers","adguard"].contains(kind)else{throw CommandPolicyError.deniedCommand};let result=try await ssh.executeAgent(.history(kind:kind,cursor:cursor,limit:2_000),configuration:configuration);guard result.succeeded else{throw NSError(domain:"TunnelDeck.Agent",code:Int(result.exitCode),userInfo:[NSLocalizedDescriptionKey:result.stderr])};return try JSONDecoder().decode(AgentEnvelope<AgentTelemetryItem<T>>.self,from:Data(result.stdout.utf8))}
+    func events(cursor:Int64,limit:Int,configuration:SSHConfiguration)async throws->AgentEnvelope<AgentTelemetryItem<AgentEventPayload>>{try await history("events",cursor,limit,configuration)}
+    func peers(cursor:Int64,limit:Int,configuration:SSHConfiguration)async throws->AgentEnvelope<AgentTelemetryItem<AgentPeerPayload>>{try await history("peers",cursor,limit,configuration)}
+    func adGuard(cursor:Int64,limit:Int,configuration:SSHConfiguration)async throws->AgentEnvelope<AgentTelemetryItem<AgentAdGuardPayload>>{try await history("adguard",cursor,limit,configuration)}
+    private func history<T:Decodable & Sendable>(_ kind:String,_ cursor:Int64,_ limit:Int,_ configuration:SSHConfiguration)async throws->AgentEnvelope<AgentTelemetryItem<T>>{guard ["events","peers","adguard"].contains(kind)else{throw CommandPolicyError.deniedCommand};let result=try await ssh.executeAgent(.history(kind:kind,cursor:cursor,limit:limit),configuration:configuration);guard result.succeeded else{throw NSError(domain:"TunnelDeck.Agent",code:Int(result.exitCode),userInfo:[NSLocalizedDescriptionKey:result.stderr])};return try JSONDecoder().decode(AgentEnvelope<AgentTelemetryItem<T>>.self,from:Data(result.stdout.utf8))}
 }

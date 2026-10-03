@@ -35,5 +35,16 @@ class AgentTests(unittest.TestCase):
             db.record({"services":{},"wireguard":{"peers":[]}},now-dt.timedelta(days=8));db.record({"services":{},"wireguard":{"peers":[]}},now)
             self.assertEqual(len(db.query("samples")["items"]),1);db.close()
 
+    def test_cursor_contract_pages_full_seven_day_history(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db=agent.TelemetryDB(pathlib.Path(directory)/"db")
+            db.db.executemany("INSERT INTO samples(id,timestamp,payload) VALUES(?,?,?)",((f"sample-{index}",float(index),"{}") for index in range(1,10_081)));db.db.commit()
+            cursor=0;seen=[]
+            while True:
+                page=db.query("samples",limit=2_000,cursor=cursor)
+                if not page["items"]:break
+                self.assertGreater(page["nextCursor"],cursor);seen.extend(item["id"] for item in page["items"]);cursor=page["nextCursor"]
+            self.assertEqual(len(seen),10_080);self.assertEqual(len(set(seen)),10_080);self.assertEqual(cursor,10_080);db.close()
+
 
 if __name__ == "__main__": unittest.main()
