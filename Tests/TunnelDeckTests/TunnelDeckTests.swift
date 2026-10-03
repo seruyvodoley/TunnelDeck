@@ -473,3 +473,50 @@ import Testing
 @MainActor @Test func pollingCoordinatorReplacesExistingLoop() async {
     let coordinator=PollingCoordinator();coordinator.start(interval:{3600},operation:{});let first=coordinator.generation;coordinator.start(interval:{3600},operation:{});#expect(coordinator.generation == first+1);coordinator.stop()
 }
+
+@Test func agentPaginationSynchronizesSevenDayBacklogWithoutDuplicates() async throws {
+    let total=10_080,pageSize=2_000;var persisted=Set<Int>(),checkpoints:[Int64]=[]
+    let result=try await AgentSyncController().paginate(initialCursor:0,safety:AgentPaginationSafety(pageSize:pageSize,maxPages:16,maxRecords:25_000),fetch:{cursor,limit in let start=Int(cursor),end=min(total,start+limit);return AgentPage(items:start<end ? Array((start+1)...end):[],nextCursor:Int64(end))},persist:{items in persisted.formUnion(items)},checkpoint:{checkpoints.append($0)})
+    #expect(persisted.count == total);#expect(result.cursor == Int64(total));#expect(result.records == total);#expect(!result.reachedSafetyLimit);#expect(checkpoints.last == Int64(total))
+}
+
+@Test func agentPaginationHandlesBoundariesAndEmptyHistory() async throws {
+    for total in [0,2_001,4_000] { var persisted:[Int]=[];let result=try await AgentSyncController().paginate(initialCursor:0,safety:AgentPaginationSafety(pageSize:2_000,maxPages:8,maxRecords:10_000),fetch:{cursor,limit in let start=Int(cursor),end=min(total,start+limit);return AgentPage(items:start<end ? Array((start+1)...end):[],nextCursor:Int64(end))},persist:{persisted += $0},checkpoint:{_ in});#expect(persisted.count == total);#expect(result.cursor == Int64(total));#expect(Set(persisted).count == total) }
+}
+
+@Test func agentPaginationRejectsStagnantCursor() async {
+    await #expect(throws:AgentSyncError.nonAdvancingCursor(current:0,returned:0)){try await AgentSyncController().paginate(initialCursor:0,fetch:{_,_ in AgentPage(items:[1],nextCursor:0)},persist:{_ in},checkpoint:{_ in})}
+}
+
+@Test func agentPaginationCheckpointsOnlyCompletePagesAndResumes() async throws {
+    var cursor:Int64=0,persisted=Set<Int>(),page=0
+    await #expect(throws:PaginationFixtureError.self){try await AgentSyncController().paginate(initialCursor:cursor,safety:AgentPaginationSafety(pageSize:2_000,maxPages:8,maxRecords:10_000),fetch:{current,limit in let start=Int(current),end=min(2_001,start+limit);return AgentPage(items:start<end ? Array((start+1)...end):[],nextCursor:Int64(end))},persist:{items in page += 1;if page==2{throw PaginationFixtureError.failed};persisted.formUnion(items)},checkpoint:{cursor=$0})}
+    #expect(cursor == 2_000);#expect(persisted.count == 2_000)
+    let resumed=try await AgentSyncController().paginate(initialCursor:cursor,safety:AgentPaginationSafety(pageSize:2_000,maxPages:8,maxRecords:10_000),fetch:{current,limit in let start=Int(current),end=min(2_001,start+limit);return AgentPage(items:start<end ? Array((start+1)...end):[],nextCursor:Int64(end))},persist:{persisted.formUnion($0)},checkpoint:{cursor=$0})
+    #expect(resumed.cursor == 2_001);#expect(persisted.count == 2_001)
+}
+
+@Test func agentPaginationSupportsCancellationAndSafetyContinuation() async throws {
+    let task=Task{try await AgentSyncController().paginate(initialCursor:0,fetch:{cursor,_ in try await Task.sleep(for:.seconds(5));return AgentPage(items:[1],nextCursor:cursor+1)},persist:{_ in},checkpoint:{_ in})};task.cancel();await #expect(throws:CancellationError.self){try await task.value}
+    var cursor:Int64=0,count=0
+    for _ in 0..<3{let result=try await AgentSyncController().paginate(initialCursor:cursor,safety:AgentPaginationSafety(pageSize:2,maxPages:1,maxRecords:2),fetch:{current,limit in let start=Int(current),end=min(5,start+limit);return AgentPage(items:start<end ? Array((start+1)...end):[],nextCursor:Int64(end))},persist:{count += $0.count},checkpoint:{cursor=$0});if !result.reachedSafetyLimit{break}}
+    #expect(cursor == 5);#expect(count == 5)
+}
+
+@Test func agentStreamsCheckpointIndependentCursors() async throws {
+    let folder=FileManager.default.temporaryDirectory.appendingPathComponent("AgentStreams-\(UUID())");try FileManager.default.createDirectory(at:folder,withIntermediateDirectories:true);defer{try? FileManager.default.removeItem(at:folder)}
+    let node=InfrastructureNode(id:UUID(),name:"Fixture",role:.primary,customRole:nil,host:"fixture.invalid",sshPort:22,createdAt:Date(),updatedAt:Date(),enabled:true),store=try InfrastructureStore(url:folder.appendingPathComponent("db.sqlite3"));try await store.upsert(node:node)
+    let result=try await AgentSyncController().synchronize(nodeID:node.id,cursors:AgentSyncCursors(),service:AgentFixtureSource(),configuration:SSHConfiguration(host:"fixture.invalid",username:"fixture",keyPath:"",timeout:1),store:store)
+    #expect(result.cursors == AgentSyncCursors(samples:1,events:1,peers:1,adGuard:1));#expect(try await store.agentSyncCursors(nodeID:node.id)==result.cursors);#expect(try await store.sampleCount(nodeID:node.id)==1);#expect(try await store.eventCount(nodeID:node.id)==1);#expect(try await store.peerHistory(nodeID:node.id).count==1);#expect(try await store.adGuardHistory(nodeID:node.id).count==1)
+}
+
+private enum PaginationFixtureError:Error{case failed}
+
+private actor AgentFixtureSource:AgentHistorySource{
+    private let timestamp=ISO8601DateFormatter().string(from:Date())
+    private func envelope<T:Decodable & Sendable>(_ cursor:Int64,_ item:T)->AgentEnvelope<AgentTelemetryItem<T>>{cursor==0 ? AgentEnvelope(schemaVersion:1,agentVersion:"2.0.0",items:[AgentTelemetryItem(rowid:1,id:String(repeating:"a",count:64),timestamp:timestamp,payload:item)],nextCursor:1):AgentEnvelope(schemaVersion:1,agentVersion:"2.0.0",items:[],nextCursor:cursor)}
+    func samples(cursor:Int64,limit:Int,configuration:SSHConfiguration)async throws->AgentEnvelope<AgentTelemetryItem<AgentMonitoringPayload>>{envelope(cursor,AgentMonitoringPayload(cpuPercent:1,memoryPercent:2,diskPercent:3,pingMilliseconds:nil,vpsState:.online,wireGuardState:.online,adGuardState:.online,antiZapretState:.online,publicDNSExposed:false,publicListeners:[]))}
+    func events(cursor:Int64,limit:Int,configuration:SSHConfiguration)async throws->AgentEnvelope<AgentTelemetryItem<AgentEventPayload>>{envelope(cursor,AgentEventPayload(from:"inactive",to:"active",event:nil))}
+    func peers(cursor:Int64,limit:Int,configuration:SSHConfiguration)async throws->AgentEnvelope<AgentTelemetryItem<AgentPeerPayload>>{envelope(cursor,AgentPeerPayload(publicIdentifier:"fixture-public",latestHandshake:0,rx:1,tx:2))}
+    func adGuard(cursor:Int64,limit:Int,configuration:SSHConfiguration)async throws->AgentEnvelope<AgentTelemetryItem<AgentAdGuardPayload>>{envelope(cursor,AgentAdGuardPayload(totalQueries:10,blockedQueries:2,blockedPercentage:20,averageProcessingTime:0.001))}
+}

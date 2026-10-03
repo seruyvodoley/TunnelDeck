@@ -9,7 +9,7 @@ enum PersistenceError: Error, LocalizedError {
 }
 
 actor InfrastructureStore {
-    static let currentSchemaVersion = 3
+    static let currentSchemaVersion = 4
     private nonisolated(unsafe) var database: OpaquePointer?
     let url: URL
 
@@ -76,6 +76,8 @@ actor InfrastructureStore {
     func alertRules(nodeID:UUID)throws->[AlertRule]{try query("SELECT payload FROM alert_rules WHERE node_id='\(nodeID.uuidString)'"){s in try JSONDecoder().decode(AlertRule.self,from:Data(Self.text(s,0).utf8))}}
     func save(alertStates:[UUID:AlertRuntimeState],nodeID:UUID)throws{for(id,state)in alertStates{let payload=String(data:try JSONEncoder().encode(state),encoding:.utf8)!;try run("INSERT INTO alert_state(rule_id,node_id,active,last_fired,acknowledged_at,payload) VALUES(?,?,?,?,?,?) ON CONFLICT(rule_id) DO UPDATE SET active=excluded.active,last_fired=excluded.last_fired,acknowledged_at=excluded.acknowledged_at,payload=excluded.payload",[.text(id.uuidString),.text(nodeID.uuidString),.integer(state.active ? 1:0),state.lastFiredAt.map(Binding.date) ?? .null,state.acknowledgedAt.map(Binding.date) ?? .null,.text(payload)])}}
     func alertStates(nodeID:UUID)throws->[UUID:AlertRuntimeState]{Dictionary(uniqueKeysWithValues:try query("SELECT rule_id,payload FROM alert_state WHERE node_id='\(nodeID.uuidString)'"){s in (UUID(uuidString:Self.text(s,0))!,try JSONDecoder().decode(AlertRuntimeState.self,from:Data(Self.text(s,1).utf8)))})}
+    func saveAgentSyncCursors(_ cursors:AgentSyncCursors,nodeID:UUID)throws{for(stream,cursor)in[("samples",cursors.samples),("events",cursors.events),("peers",cursors.peers),("adguard",cursors.adGuard)]{try run("INSERT INTO agent_sync_state(node_id,stream,cursor) VALUES(?,?,?) ON CONFLICT(node_id,stream) DO UPDATE SET cursor=excluded.cursor",[.text(nodeID.uuidString),.text(stream),.integer64(UInt64(max(0,cursor)))])}}
+    func agentSyncCursors(nodeID:UUID)throws->AgentSyncCursors{let values=Dictionary(uniqueKeysWithValues:try query("SELECT stream,cursor FROM agent_sync_state WHERE node_id='\(nodeID.uuidString)'"){s in(Self.text(s,0),sqlite3_column_int64(s,1))});return AgentSyncCursors(samples:values["samples"] ?? 0,events:values["events"] ?? 0,peers:values["peers"] ?? 0,adGuard:values["adguard"] ?? 0)}
     private func prune(_ table:String,_ nodeID:UUID,_ now:Date)throws{try run("DELETE FROM \(table) WHERE node_id=? AND timestamp<?",[.text(nodeID.uuidString),.real(now.addingTimeInterval(-604_800).timeIntervalSince1970)])}
 
     private static func configure(_ db: OpaquePointer?) throws {
@@ -118,6 +120,10 @@ actor InfrastructureStore {
                 try exec(db, "CREATE TABLE peer_history(id TEXT PRIMARY KEY,node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,timestamp REAL NOT NULL,peer_id TEXT NOT NULL,name TEXT NOT NULL,vpn_ip TEXT NOT NULL,state TEXT NOT NULL,rx INTEGER NOT NULL,tx INTEGER NOT NULL,latest_handshake REAL); CREATE INDEX peer_history_node_time ON peer_history(node_id,timestamp); CREATE TABLE adguard_history(id TEXT PRIMARY KEY,node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,timestamp REAL NOT NULL,total_queries INTEGER NOT NULL,blocked_queries INTEGER NOT NULL,blocked_percentage REAL NOT NULL,average_processing_time REAL NOT NULL); CREATE INDEX adguard_history_node_time ON adguard_history(node_id,timestamp); PRAGMA user_version=3;")
                 try exec(db, "COMMIT")
             } catch { try? exec(db, "ROLLBACK"); throw error }
+        }
+        if current < 4 {
+            try exec(db,"BEGIN IMMEDIATE")
+            do { try exec(db,"CREATE TABLE agent_sync_state(node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,stream TEXT NOT NULL,cursor INTEGER NOT NULL,PRIMARY KEY(node_id,stream)); PRAGMA user_version=4;");try exec(db,"COMMIT") } catch { try? exec(db,"ROLLBACK");throw error }
         }
     }
 

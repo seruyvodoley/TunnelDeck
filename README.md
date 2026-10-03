@@ -1,10 +1,18 @@
-# TunnelDeck 2.0.0
+# TunnelDeck 2.0.1
 
 TunnelDeck distinguishes live, stale, unknown, and explicitly observed offline state. Local charts retain seven days, explain Mac sleep gaps, and never synthesize missing observations. The optional Server Agent 2.0 design adds cursor-based catch-up history while keeping read-only collection separate from Helper 2.0 transactional remediation. See `SERVER_AGENT.md`, `HELPER_PROTOCOL.md`, and `SECURITY_MODEL.md`; nothing is installed automatically.
 
 TunnelDeck preserves helper 1.2.1 compatibility while adding a local, read-only-first fleet operations layer. Agent/Helper 2.0 deployment remains an explicitly separate, preview-first operation.
 
-## TunnelDeck 2.0.0 release notes
+## TunnelDeck 2.0.1 release notes
+
+- Full paginated Agent catch-up for seven-day backlogs with independent per-stream cursor checkpoints, cancellation and bounded synchronization.
+- Sleep/wake hardening and explicit live, stale, unknown and observed-offline states.
+- Gap-aware 1-hour, 6-hour, 24-hour and 7-day history UX.
+- Agent 2.0 integration and Helper 2 capability negotiation while retaining helper 1.2.1 compatibility.
+- Alert Rules slider layout fix for the AppKit hang.
+
+## TunnelDeck 2.0.0 foundations
 
 - Stable node-ID based multi-node domain and Fleet Overview.
 - Versioned SQLite persistence with idempotent imports for 1.x monitoring, events, alert settings, WireGuard peer history and AdGuard history.
