@@ -15,6 +15,7 @@ protocol AgentHistorySource:Sendable{
 }
 
 actor AgentSyncController {
+    private let timestampFormatter = ISO8601DateFormatter()
     func synchronize(nodeID:UUID,cursors initial:AgentSyncCursors,service:any AgentHistorySource,configuration:SSHConfiguration,store:InfrastructureStore,safety:AgentPaginationSafety = .standard)async throws->AgentSyncResult{
         var cursors=initial,imported=0,newest:Date?,limited=false
         let samples=try await paginate(initialCursor:cursors.samples,safety:safety,fetch:{cursor,limit in let response=try await service.samples(cursor:cursor,limit:limit,configuration:configuration);return AgentPage(items:response.items ?? [],nextCursor:response.nextCursor ?? cursor)},persist:{items in for item in items{try Task.checkCancellation();let timestamp=try self.date(item.timestamp),value=item.payload;try await store.insert(sample:MonitoringSample(nodeID:nodeID,id:try self.stableUUID(item.id),timestamp:timestamp,cpuPercent:value.cpuPercent,memoryPercent:value.memoryPercent,diskPercent:value.diskPercent,pingMilliseconds:value.pingMilliseconds,vpsState:value.vpsState,wireGuardState:value.wireGuardState,adGuardState:value.adGuardState,antiZapretState:value.antiZapretState,publicDNSExposed:value.publicDNSExposed,publicListeners:value.publicListeners),nodeID:nodeID);newest=max(newest ?? timestamp,timestamp)}},checkpoint:{cursor in cursors.samples=cursor;try await store.saveAgentSyncCursors(cursors,nodeID:nodeID)})
@@ -40,6 +41,6 @@ actor AgentSyncController {
         }
         return AgentPaginationResult(cursor:cursor,records:records,pages:pages,reachedSafetyLimit:true)
     }
-    private func date(_ value:String)throws->Date{guard let date=ISO8601DateFormatter().date(from:value)else{throw AgentSyncError.malformedTimestamp(value)};return date}
+    private func date(_ value:String)throws->Date{guard let date=timestampFormatter.date(from:value)else{throw AgentSyncError.malformedTimestamp(value)};return date}
     private func stableUUID(_ hex:String)throws->UUID{let value=String(hex.prefix(32)),formatted="\(value.prefix(8))-\(value.dropFirst(8).prefix(4))-\(value.dropFirst(12).prefix(4))-\(value.dropFirst(16).prefix(4))-\(value.dropFirst(20).prefix(12))";guard hex.count>=32,let id=UUID(uuidString:formatted)else{throw AgentSyncError.malformedIdentifier(hex)};return id}
 }

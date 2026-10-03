@@ -78,6 +78,18 @@ struct SettingsView: View {
                 }))
                 Toggle("State-change notifications", isOn: $model.settings.notificationsEnabled).onChange(of: model.settings.notificationsEnabled) { _, enabled in if enabled { NotificationService.request() } }
             }
+            #if DEBUG
+            Section("Diagnostics (DEBUG)") {
+                KeyValueRow(key:"Active node",value:model.activeServerID.map{String($0.uuidString.prefix(8))+"…"} ?? "None")
+                KeyValueRow(key:"Polling",value:"\(model.debugPollingRunning ? "Running":"Stopped") · generation \(model.debugPollingGeneration)")
+                KeyValueRow(key:"Last refresh",value:model.lastRefreshDuration.map{String(format:"%.2f s",$0)} ?? "Never")
+                KeyValueRow(key:"Last Agent sync",value:model.lastAgentSyncAt?.formatted() ?? "Never")
+                KeyValueRow(key:"Loaded rows",value:"samples \(model.monitoringSamples.count), events \(model.monitoringEvents.count), peers \(model.peerHistory.count), DNS \(model.adGuardHistory.count)")
+                KeyValueRow(key:"SQLite schema",value:model.sqliteSchemaVersion.map(String.init) ?? "Unavailable")
+                KeyValueRow(key:"Agent cursors",value:"S \(model.agentCursors.samples), E \(model.agentCursors.events), P \(model.agentCursors.peers), D \(model.agentCursors.adGuard)")
+                if let error=model.persistenceErrorMessage{Text(error).foregroundStyle(.orange).textSelection(.enabled)}
+            }
+            #endif
             Button("Save") { model.saveSettings() }
         }.formStyle(.grouped).padding()
             .alert("Enable Write Mode?", isPresented: $state.confirmWriteMode) {

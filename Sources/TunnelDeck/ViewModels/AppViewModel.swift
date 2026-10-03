@@ -54,6 +54,11 @@ final class AppViewModel: ObservableObject {
     @Published var peerHistory: [PeerHistorySample] = []
     @Published var adGuardHistory: [AdGuardHistorySample] = []
     @Published var lastKnownSamples: [UUID: MonitoringSample] = [:]
+    @Published private(set) var lastRefreshDuration: TimeInterval?
+    @Published private(set) var lastAgentSyncAt: Date?
+    @Published private(set) var persistenceErrorMessage: String?
+    @Published private(set) var sqliteSchemaVersion: Int?
+    @Published private(set) var agentCursors = AgentSyncCursors()
 
     let ssh = SSHService()
     let adGuardAPI = AdGuardAPIService()
@@ -66,16 +71,25 @@ final class AppViewModel: ObservableObject {
     private let fleetController = FleetController()
     private let agentSyncController = AgentSyncController()
     private let pollingCoordinator = PollingCoordinator()
+    private let refreshCadence = RefreshCadenceController()
+    private let nodeOperations = NodeOperationGuard()
     private let persistenceStore = try? InfrastructureStore()
     private var currentConfigurationHashes: [String: String] = [:]
     private var lastPeerHistorySample: Date?
     private var lastAdGuardHistorySample: Date?
     private var lifecycleObservers: [NSObjectProtocol] = []
     private var wakeTask: Task<Void, Never>?
-    private var agentSyncTask: Task<Void, Never>?
+    private var nodeLoadTask: Task<Void, Never>?
+    private var agentSyncTask: Task<AgentSyncResult?, Never>?
+    private var agentSyncToken: UUID?
+    private var refreshToken: UUID?
+    private let securityOperation = InFlightOperationState()
+    private var healthCheckTask: Task<Void,Never>?
+    private var healthCheckToken: UUID?
+    private var alertSaveTask: Task<Void, Never>?
     private var lastAgentSyncAttempt: Date?
     private var isMacSleeping = false
-    private var previousCPUTicks: (idle: Double, total: Double)?
+    private let cpuDeltaTracker = CPUDeltaTracker()
 
     init() {
         let decoded = UserDefaults.standard.data(forKey: "settings").flatMap { try? JSONDecoder().decode(AppSettings.self, from: $0) }
@@ -93,7 +107,7 @@ final class AppViewModel: ObservableObject {
         configureLifecycleObservers()
         Task { diagnostics = await history.load() }
         Task { activity = await activityStore.load() }
-        Task { await loadMonitoringHistory(); await syncAgentHistory(); await loadMonitoringHistory(); await loadBaseline() }
+        nodeLoadTask=Task { [weak self] in guard let self else{return};await self.loadMonitoringHistory();guard !Task.isCancelled else{return};await self.syncAgentHistory();guard !Task.isCancelled else{return};await self.loadMonitoringHistory();await self.loadBaseline() }
     }
 
     var configuration: SSHConfiguration { SSHConfiguration(host: settings.host, username: settings.username, keyPath: NSString(string: settings.keyPath).expandingTildeInPath, timeout: 8, port: settings.port) }
@@ -115,9 +129,10 @@ final class AppViewModel: ObservableObject {
 
     func selectServer(_ id: UUID) {
         guard let server = servers.first(where: { $0.id == id }) else { return }
-        activeServerID = id; UserDefaults.standard.set(id.uuidString, forKey: "activeServerID"); settings.host = server.host; settings.port = server.port; settings.username = server.username; settings.keyPath = server.keyPath
+        nodeOperations.advance();refreshCadence.reset();cpuDeltaTracker.reset();securityOperation.cancel();nodeLoadTask?.cancel();wakeTask?.cancel();agentSyncTask?.cancel();alertSaveTask?.cancel();healthCheckTask?.cancel();healthCheckTask=nil;agentSyncTask=nil;agentSyncToken=nil;refreshToken=nil;healthCheckToken=nil;isRefreshing=false;isRunningHealthCheck=false
+        activeServerID = id; UserDefaults.standard.set(id.uuidString, forKey: "activeServerID"); settings.host = server.host; settings.port = server.port; settings.username = server.username; settings.keyPath = server.keyPath;isRefreshingSecurity=false
         system = SystemSnapshot(); wireGuard = WireGuardSnapshot(); units = []; listeners = []; healthReport = nil; security = SecuritySnapshot(); exposureEndpoints=[];monitoringSamples = []; monitoringEvents = []; peerHistory=[];adGuardHistory=[];incidents=[];alertRules=[];alertStates=[:];alertEvents=[];configurationBaseline=nil;baselineDrift=[];lastPeerHistorySample=nil;lastAdGuardHistorySample=nil;loadServerScopedState()
-        saveSettings(); Task { await loadMonitoringHistory();await syncAgentHistory();await loadMonitoringHistory();await loadBaseline();await refresh() }
+        saveSettings();nodeLoadTask=Task{[weak self] in guard let self else{return};await self.loadMonitoringHistory();guard !Task.isCancelled else{return};await self.syncAgentHistory();guard !Task.isCancelled else{return};await self.loadMonitoringHistory();await self.loadBaseline();guard !Task.isCancelled else{return};await self.refresh()}
         updateFleet()
     }
 
@@ -135,10 +150,11 @@ final class AppViewModel: ObservableObject {
         lifecycleObservers.append(center.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in Task { @MainActor in self?.resumeAfterWake() } })
     }
 
-    private func prepareForSleep() { isMacSleeping=true;wakeTask?.cancel(); pollingCoordinator.stop(); statusMessage = "Monitoring paused while Mac sleeps" }
+    private func prepareForSleep() { isMacSleeping=true;nodeOperations.advance();cpuDeltaTracker.reset();securityOperation.cancel();wakeTask?.cancel();nodeLoadTask?.cancel();agentSyncTask?.cancel();healthCheckTask?.cancel();healthCheckTask=nil;agentSyncTask=nil;agentSyncToken=nil;refreshToken=nil;healthCheckToken=nil;isRefreshing=false;isRefreshingSecurity=false;isRunningHealthCheck=false;pollingCoordinator.stop(); statusMessage = "Monitoring paused while Mac sleeps" }
 
     func resumeAfterWake() {
         isMacSleeping=false
+        cpuDeltaTracker.reset()
         wakeTask?.cancel()
         pollingCoordinator.stop()
         wakeTask = Task { [weak self] in
@@ -154,67 +170,69 @@ final class AppViewModel: ObservableObject {
     }
 
     var observationFreshness: ObservationFreshness { ObservationFreshness(lastObservedAt: monitoringSamples.last?.timestamp, now: Date(), staleAfter: max(settings.pollingInterval * 3, 120)) }
+    var debugPollingGeneration:Int{pollingCoordinator.generation}
+    var debugPollingRunning:Bool{pollingCoordinator.isRunning}
 
     func refresh() async {
         guard !isRefreshing else { return }
-        isRefreshing = true; defer { isRefreshing = false }
+        let context=nodeOperations.capture(nodeID:activeServerID),token=UUID(),capturedConfiguration=configuration,start=Date()
+        let discoveryDue=refreshCadence.shouldRun("discovery",every:60)
+        refreshToken=token;isRefreshing = true; defer { if refreshToken==token{isRefreshing=false;refreshToken=nil} }
         system.macLANIP = LocalNetworkService.lanIPv4()
-        async let hostname = execute(.hostname, subsystem: "System")
-        async let cpu = execute(.cpu, subsystem: "System")
-        async let macPublicIP = LocalNetworkService.publicIPv4()
-        async let os = execute(.osRelease, subsystem: "System")
-        async let uname = execute(.uname, subsystem: "System")
-        async let uptime = execute(.uptime, subsystem: "System")
-        async let memory = execute(.memory, subsystem: "System")
-        async let disk = execute(.disk, subsystem: "System")
-        async let ipv4 = execute(.publicIPv4, subsystem: "Network")
-        async let ipv6 = execute(.publicIPv6, subsystem: "Network")
-        async let wg = execute(.wireGuard, subsystem: "WireGuard")
-        async let wgAddress = execute(.wireGuardAddress, subsystem: "WireGuard")
-        async let wgLink = execute(.wireGuardLink, subsystem: "WireGuard")
-        async let serviceUnits = execute(.units, subsystem: "systemd")
-        async let socketListeners = execute(.listeners, subsystem: "DNS")
-        async let azSettings = execute(.antiZapretSettings, subsystem: "AntiZapret")
-        async let profileList = execute(.profiles, subsystem: "Profiles")
-        async let monitoringPing = execute(.monitoringPing, subsystem: "Monitoring")
+        async let hostname = execute(.hostname, subsystem: "System", configuration:capturedConfiguration)
+        async let cpu = execute(.cpu, subsystem: "System", configuration:capturedConfiguration)
+        let cachedMacPublicIP=system.macPublicIP
+        async let macPublicIP = discoveryDue ? LocalNetworkService.publicIPv4() : cachedMacPublicIP
+        async let os = executeIf(discoveryDue,.osRelease,subsystem:"System",configuration:capturedConfiguration)
+        async let uname = executeIf(discoveryDue,.uname,subsystem:"System",configuration:capturedConfiguration)
+        async let uptime = execute(.uptime, subsystem: "System", configuration:capturedConfiguration)
+        async let memory = execute(.memory, subsystem: "System", configuration:capturedConfiguration)
+        async let disk = execute(.disk, subsystem: "System", configuration:capturedConfiguration)
+        async let ipv4 = executeIf(discoveryDue,.publicIPv4,subsystem:"Network",configuration:capturedConfiguration)
+        async let ipv6 = executeIf(discoveryDue,.publicIPv6,subsystem:"Network",configuration:capturedConfiguration)
+        async let wg = execute(.wireGuard, subsystem: "WireGuard", configuration:capturedConfiguration)
+        async let wgAddress = executeIf(discoveryDue,.wireGuardAddress,subsystem:"WireGuard",configuration:capturedConfiguration)
+        async let wgLink = executeIf(discoveryDue,.wireGuardLink,subsystem:"WireGuard",configuration:capturedConfiguration)
+        async let serviceUnits = executeIf(discoveryDue,.units,subsystem:"systemd",configuration:capturedConfiguration)
+        async let socketListeners = executeIf(discoveryDue,.listeners,subsystem:"DNS",configuration:capturedConfiguration)
+        async let azSettings = executeIf(discoveryDue,.antiZapretSettings,subsystem:"AntiZapret",configuration:capturedConfiguration)
+        async let profileList = executeIf(discoveryDue,.profiles,subsystem:"Profiles",configuration:capturedConfiguration)
+        async let monitoringPing = execute(.monitoringPing, subsystem: "Monitoring", configuration:capturedConfiguration)
         let values = await (hostname, os, uname, uptime, memory, disk, ipv4, ipv6, wg, wgAddress, wgLink, serviceUnits, socketListeners, azSettings, profileList, cpu, macPublicIP, monitoringPing)
-        guard !isMacSleeping else { return }
+        guard !isMacSleeping,nodeOperations.accepts(nodeID:context.0,generation:context.1,activeNodeID:activeServerID),refreshToken==token else { return }
         system.hostname = values.0.stdout.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty ?? "—"
-        system.osVersion = parseOS(values.1.stdout)
-        system.kernel = values.2.stdout.split(separator: " ").dropFirst(2).first.map(String.init) ?? "—"
+        if discoveryDue{system.osVersion=parseOS(values.1.stdout);system.kernel=values.2.stdout.split(separator:" ").dropFirst(2).first.map(String.init) ?? "—"}
         system.uptime = values.3.stdout.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty ?? "—"
         system.loadAverage = parseLoad(values.3.stdout)
         system.memoryPercent = parseMemory(values.4.stdout)
         system.diskPercent = parseDisk(values.5.stdout)
-        system.publicIPv4 = values.6.stdout.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty ?? "—"
-        system.publicIPv6 = values.7.stdout.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty ?? "—"
+        if discoveryDue{system.publicIPv4=values.6.stdout.trimmingCharacters(in:.whitespacesAndNewlines).nonEmpty ?? "—";system.publicIPv6=values.7.stdout.trimmingCharacters(in:.whitespacesAndNewlines).nonEmpty ?? "—"}
         system.cpuPercent = parseCPU(values.15.stdout)
         system.macPublicIP = values.16
         system.pingMilliseconds = MonitoringMetricParser.pingMilliseconds(values.17.stdout)
         system.sshAvailable = values.0.succeeded
         system.health = values.0.succeeded ? .online : .offline
+        let cachedWGAddress=wireGuard.address,cachedWGMTU=wireGuard.mtu
         wireGuard = WireGuardParser.parse(values.8.stdout, timeout: settings.handshakeTimeout)
-        wireGuard.address = parseWireGuardAddress(values.9.stdout)
-        if let mtuRange = values.10.stdout.range(of: #"mtu\s+(\d+)"#, options: .regularExpression) { wireGuard.mtu = values.10.stdout[mtuRange].split(separator: " ").last.map(String.init) ?? "—" }
-        units = SystemctlParser.parse(values.11.stdout)
-        listeners = SSParser.parse(values.12.stdout)
-        antiZapretSettings = Dictionary(uniqueKeysWithValues: values.13.stdout.split(separator: "\n").compactMap { line in
-            let pair = line.split(separator: "=", maxSplits: 1).map(String.init); return pair.count == 2 ? (pair[0], pair[1]) : nil
-        })
-        profiles = ProfileParser.parseListing(values.14.stdout)
-        lastRefresh = Date(); statusMessage = values.0.succeeded ? "Updated" : "SSH unavailable"; updateFleet()
-        if values.0.succeeded { await refreshHelper(); await sampleAdGuardHistoryIfNeeded() }
+        if !discoveryDue{wireGuard.address=cachedWGAddress;wireGuard.mtu=cachedWGMTU}
+        if discoveryDue{wireGuard.address=parseWireGuardAddress(values.9.stdout);if let mtuRange=values.10.stdout.range(of:#"mtu\s+(\d+)"#,options:.regularExpression){wireGuard.mtu=values.10.stdout[mtuRange].split(separator:" ").last.map(String.init) ?? "—"};units=SystemctlParser.parse(values.11.stdout);listeners=SSParser.parse(values.12.stdout);antiZapretSettings=Dictionary(uniqueKeysWithValues:values.13.stdout.split(separator:"\n").compactMap{line in let pair=line.split(separator:"=",maxSplits:1).map(String.init);return pair.count==2 ? (pair[0],pair[1]):nil});profiles=ProfileParser.parseListing(values.14.stdout)}
+        lastRefresh = Date();lastRefreshDuration=Date().timeIntervalSince(start);statusMessage = values.0.succeeded ? "Updated" : "SSH unavailable"; updateFleet()
+        if values.0.succeeded,refreshCadence.shouldRun("helper-api",every:60) { await refreshHelper(); await sampleAdGuardHistoryIfNeeded() }
         await recordMonitoringState()
         await performScheduledBackupIfNeeded()
         scheduleRegularAgentSync()
     }
 
     func refreshHelper() async {
-        if let capabilities = await helper.capabilities(configuration: configuration) {
+        let context=nodeOperations.capture(nodeID:activeServerID),capturedConfiguration=configuration
+        if let capabilities = await helper.capabilities(configuration: capturedConfiguration) {
+            let loadedBackups=(try? await helper.listBackups(configuration:capturedConfiguration)) ?? []
+            let loadedPeers=(try? await helper.peers(configuration:capturedConfiguration)) ?? []
+            guard nodeOperations.accepts(nodeID:context.0,generation:context.1,activeNodeID:activeServerID) else{return}
             helperCapabilities = capabilities; helperVersion = capabilities.version; helperError = nil
-            backups = (try? await helper.listBackups(configuration: configuration)) ?? []
-            managedPeers = (try? await helper.peers(configuration: configuration)) ?? []
+            backups=loadedBackups;managedPeers=loadedPeers
         } else {
+            guard nodeOperations.accepts(nodeID:context.0,generation:context.1,activeNodeID:activeServerID) else{return}
             helperCapabilities = nil; helperVersion = nil; helperError = AppError(title: "Helper check failed", message: "TunnelDeck could not negotiate helper capabilities.", technicalDetails: "No compatible helper-info or legacy version response.", recommendedAction: "Verify SSH access and the installed helper.")
         }
     }
@@ -263,7 +281,7 @@ final class AppViewModel: ObservableObject {
         guard settings.writeModeEnabled, helperCanUseLegacyWrites else { return false }
         do {
             let change = try await helper.service(action: action, unit: unit, configuration: configuration)
-            logs.insert(LogEntry(timestamp: Date(), subsystem: "System", command: "helper service \(action) \(unit)", stdout: "state=\(change.state) backup=\(change.backup)", stderr: "", exitCode: 0), at: 0)
+            appendLog(LogEntry(timestamp: Date(), subsystem: "System", command: "helper service \(action) \(unit)", stdout: "state=\(change.state) backup=\(change.backup)", stderr: "", exitCode: 0))
             await activityStore.append(operation: "Service \(action)", server: settings.host, preview: unit, result: "state=\(change.state), backup=\(change.backup)")
             activity = await activityStore.load()
             await refresh()
@@ -275,17 +293,26 @@ final class AppViewModel: ObservableObject {
     }
 
     func runFullHealthCheck() async {
-        guard !isRunningHealthCheck else { return }
-        isRunningHealthCheck = true
-        defer { isRunningHealthCheck = false }
+        if let healthCheckTask{await healthCheckTask.value;return}
+        let context=nodeOperations.capture(nodeID:activeServerID),configuration=self.configuration,host=settings.host,handshakeTimeout=settings.handshakeTimeout,approved=approvedListenerIDs,ignored=ignoredPeerIDs,token=UUID()
+        isRunningHealthCheck=true;healthCheckToken=token
+        let task=Task{[weak self] in guard let self else{return};await self.performFullHealthCheck(context:context,configuration:configuration,host:host,handshakeTimeout:handshakeTimeout,approved:approved,ignored:ignored)}
+        healthCheckTask=task;await task.value
+        if healthCheckToken==token{healthCheckTask=nil;healthCheckToken=nil;isRunningHealthCheck=false}
+    }
+
+    private func performFullHealthCheck(context:(UUID?,Int),configuration:SSHConfiguration,host:String,handshakeTimeout:TimeInterval,approved:Set<String>,ignored:Set<String>) async {
 
         let commands: [ReadCommand] = [.hostname, .wireGuardService, .wireGuard, .wireGuardAll, .wireGuardAddress, .udpListeners, .ipForward, .natRules, .pingInternet, .dnsTest, .adGuardStatus, .adGuardBinds, .antiZapretStatus, .units, .disk, .memory, .uptime, .listeners, .firewallState, .configurationHashes]
         var results: [ReadCommand: CommandResult] = [:]
         for command in commands {
-            results[command] = await execute(command, subsystem: "Doctor")
+            guard !Task.isCancelled else{return}
+            results[command] = await execute(command, subsystem: "Doctor",configuration:configuration)
         }
 
-        var freshWireGuard = WireGuardParser.parse(results[.wireGuard]?.stdout ?? "", timeout: settings.handshakeTimeout)
+        guard !Task.isCancelled,nodeOperations.accepts(nodeID:context.0,generation:context.1,activeNodeID:activeServerID) else{return}
+
+        var freshWireGuard = WireGuardParser.parse(results[.wireGuard]?.stdout ?? "", timeout: handshakeTimeout)
         freshWireGuard.address = parseWireGuardAddress(results[.wireGuardAddress]?.stdout ?? "")
 
         var freshSystem = system
@@ -302,14 +329,16 @@ final class AppViewModel: ObservableObject {
             listeners: freshListeners,
             system: freshSystem,
             wireGuard: freshWireGuard,
-            host: settings.host,
-            approvedListenerIDs: approvedListenerIDs,
-            ignoredPeerIDs: ignoredPeerIDs
+            host: host,
+            approvedListenerIDs: approved,
+            ignoredPeerIDs: ignored
         )
         detectConfigurationDrift(results[.configurationHashes]?.stdout ?? "", storeBaseline: healthReport?.state == .online)
         if healthReport?.state == .online { lastSuccessfulHealthCheck = Date() }
-        await activityStore.append(operation: "Full Health Check", server: settings.host, preview: "\(commands.count) read-only checks", result: healthReport?.state.rawValue ?? "unknown")
-        activity = await activityStore.load()
+        let resultState=healthReport?.state.rawValue ?? "unknown"
+        await activityStore.append(operation: "Full Health Check", server: host, preview: "\(commands.count) read-only checks", result: resultState)
+        let loadedActivity=await activityStore.load()
+        guard !Task.isCancelled,nodeOperations.accepts(nodeID:context.0,generation:context.1,activeNodeID:activeServerID) else{return};activity=loadedActivity
     }
 
     func approveListener(for issue: HealthIssue) {
@@ -382,41 +411,45 @@ final class AppViewModel: ObservableObject {
     }
 
     func refreshAdGuardAPI() async {
-        let baseURL = KeychainService.load(account: "adguard-url-\(settings.host)") ?? discoveredAdGuardBaseURL() ?? ""
-        let username = KeychainService.load(account: "adguard-user-\(settings.host)") ?? ""
-        let password = KeychainService.load(account: "adguard-password-\(settings.host)") ?? ""
+        let context=nodeOperations.capture(nodeID:activeServerID),host=settings.host
+        let baseURL = KeychainService.load(account: "adguard-url-\(host)") ?? discoveredAdGuardBaseURL() ?? ""
+        let username = KeychainService.load(account: "adguard-user-\(host)") ?? ""
+        let password = KeychainService.load(account: "adguard-password-\(host)") ?? ""
         guard !baseURL.isEmpty, !username.isEmpty, !password.isEmpty else {
-            adGuard.error = "AdGuard API credentials are not configured"
+            if nodeOperations.accepts(nodeID:context.0,generation:context.1,activeNodeID:activeServerID){adGuard.error = "AdGuard API credentials are not configured"}
             return
         }
-        adGuard = await adGuardAPI.load(baseURL: baseURL, username: username, password: password)
+        let loaded=await adGuardAPI.load(baseURL:baseURL,username:username,password:password)
+        guard nodeOperations.accepts(nodeID:context.0,generation:context.1,activeNodeID:activeServerID) else{return};adGuard=loaded
     }
 
     func refreshSecurityAudit() async {
         guard !isRefreshingSecurity else { return }
+        let context=nodeOperations.capture(nodeID:activeServerID),capturedConfiguration=configuration,capturedHost=settings.host,capturedPort=settings.port,token=securityOperation.begin()
         isRefreshingSecurity = true
-        defer { isRefreshingSecurity = false }
+        defer { if securityOperation.finish(token){isRefreshingSecurity=false} }
 
-        async let freshListeners = execute(.listeners, subsystem: "Security")
-        async let allWireGuard = execute(.wireGuardAll, subsystem: "Security")
-        async let openVPN = execute(.openVPNBinds, subsystem: "Security")
-        async let sshConfig = execute(.sshEffectiveConfig, subsystem: "Security")
-        async let authLog = execute(.sshAuthLog24h, subsystem: "Security")
-        async let firewall = execute(.firewallState, subsystem: "Security")
+        async let freshListeners = execute(.listeners, subsystem: "Security",configuration:capturedConfiguration)
+        async let allWireGuard = execute(.wireGuardAll, subsystem: "Security",configuration:capturedConfiguration)
+        async let openVPN = execute(.openVPNBinds, subsystem: "Security",configuration:capturedConfiguration)
+        async let sshConfig = execute(.sshEffectiveConfig, subsystem: "Security",configuration:capturedConfiguration)
+        async let authLog = execute(.sshAuthLog24h, subsystem: "Security",configuration:capturedConfiguration)
+        async let firewall = execute(.firewallState, subsystem: "Security",configuration:capturedConfiguration)
 
         let values = await (freshListeners, allWireGuard, openVPN, sshConfig, authLog, firewall)
+        guard nodeOperations.accepts(nodeID:context.0,generation:context.1,activeNodeID:activeServerID) else{return}
         let parsedListeners = SSParser.parse(values.0.stdout)
         let cleanPort = Int(wireGuard.listenPort)
         let classified = SecurityAuditParser.classifyListeners(
             parsedListeners,
-            host: settings.host,
+            host: capturedHost,
             cleanWireGuardPort: cleanPort,
             wireGuardAll: values.1.stdout,
             openVPNBinds: values.2.stdout
         )
         let ssh = SecurityAuditParser.parseSSHConfig(
             values.3.stdout,
-            configuredPort: settings.port,
+            configuredPort: capturedPort,
             authLog: values.4.stdout
         )
 
@@ -561,7 +594,17 @@ final class AppViewModel: ObservableObject {
     }
 
     func loadMonitoringHistory() async {
-        if let nodeID=activeServerID,let profile=servers.first(where:{$0.id==nodeID}),let persistenceStore { let node=LegacyModelAdapter.node(from:profile);try? await persistenceStore.upsert(node:node);_=try? await LegacyMonitoringImporter().importHistory(for:node,into:persistenceStore);try? await LegacyTelemetryImporter().importHistory(for:node,into:persistenceStore);monitoringSamples=(try? await persistenceStore.samples(nodeID:nodeID)) ?? [];for server in servers{if let sample=try? await persistenceStore.samples(nodeID:server.id).last{lastKnownSamples[server.id]=sample}};let stored=(try? await persistenceStore.events(nodeID:nodeID)) ?? [];monitoringEvents=stored.filter{$0.kind=="monitoring"}.map{MonitoringEvent(id:$0.id,timestamp:$0.timestamp,component:$0.componentID,title:$0.title,detail:$0.detail,state:$0.state,recovered:$0.isRecovery)};alertEvents=stored.filter{$0.kind=="alert"};peerHistory=(try? await persistenceStore.peerHistory(nodeID:nodeID)) ?? [];adGuardHistory=(try? await persistenceStore.adGuardHistory(nodeID:nodeID)) ?? [];let saved=(try? await persistenceStore.alertRules(nodeID:nodeID)) ?? [];let legacy=(try? await LegacyAlertImporter().rules(for:node)) ?? [];let defaults=AlertEngine.defaultRules(nodeID:nodeID,peerTimeout:settings.handshakeTimeout);let imported=saved.isEmpty ? legacy:saved;let byKind=Dictionary(uniqueKeysWithValues:imported.map{($0.kind,$0)});alertRules=defaults.map{byKind[$0.kind] ?? $0};alertStates=(try? await persistenceStore.alertStates(nodeID:nodeID)) ?? [:];try? await persistenceStore.save(alertRules:alertRules,nodeID:nodeID) } else { monitoringSamples=await monitoringStore.loadSamples(host:settings.host);monitoringEvents=await monitoringStore.loadEvents(host:settings.host) }
+        let context=nodeOperations.capture(nodeID:activeServerID),cutoff=Date().addingTimeInterval(-MonitoringHistory.retention)
+        if let nodeID=context.0,let profile=servers.first(where:{$0.id==nodeID}),let persistenceStore {
+            do {
+                let node=LegacyModelAdapter.node(from:profile);try await persistenceStore.upsert(node:node);_=try await LegacyMonitoringImporter().importHistory(for:node,into:persistenceStore);try await LegacyTelemetryImporter().importHistory(for:node,into:persistenceStore)
+                let samples=try await persistenceStore.samples(nodeID:nodeID,since:cutoff),stored=try await persistenceStore.events(nodeID:nodeID,since:cutoff),peers=try await persistenceStore.peerHistory(nodeID:nodeID,since:cutoff),dns=try await persistenceStore.adGuardHistory(nodeID:nodeID,since:cutoff),saved=try await persistenceStore.alertRules(nodeID:nodeID),states=try await persistenceStore.alertStates(nodeID:nodeID),cursors=try await persistenceStore.agentSyncCursors(nodeID:nodeID),schema=try await persistenceStore.schemaVersion(),latest=try await persistenceStore.latestSamples()
+                let legacy=(try? await LegacyAlertImporter().rules(for:node)) ?? [],defaults=AlertEngine.defaultRules(nodeID:nodeID,peerTimeout:settings.handshakeTimeout),imported=saved.isEmpty ? legacy:saved,byKind=Dictionary(uniqueKeysWithValues:imported.map{($0.kind,$0)}),rules=defaults.map{byKind[$0.kind] ?? $0}
+                guard nodeOperations.accepts(nodeID:nodeID,generation:context.1,activeNodeID:activeServerID),!Task.isCancelled else{return}
+                monitoringSamples=samples;monitoringEvents=stored.filter{$0.kind=="monitoring"}.map{MonitoringEvent(id:$0.id,timestamp:$0.timestamp,component:$0.componentID,title:$0.title,detail:$0.detail,state:$0.state,recovered:$0.isRecovery)};alertEvents=Array(stored.filter{$0.kind=="alert"}.suffix(500));peerHistory=peers;adGuardHistory=dns;alertRules=rules;alertStates=states;agentCursors=cursors;sqliteSchemaVersion=schema;lastKnownSamples=latest;persistenceErrorMessage=nil
+                if let sample=samples.last{lastKnownSamples[nodeID]=sample};try await persistenceStore.save(alertRules:rules,nodeID:nodeID)
+            }catch{guard nodeOperations.accepts(nodeID:nodeID,generation:context.1,activeNodeID:activeServerID)else{return};persistenceErrorMessage=SecretRedactor.redact(error.localizedDescription)}
+        } else { let samples=await monitoringStore.loadSamples(host:settings.host),events=await monitoringStore.loadEvents(host:settings.host);guard nodeOperations.accepts(nodeID:context.0,generation:context.1,activeNodeID:activeServerID)else{return};monitoringSamples=samples;monitoringEvents=events }
         rebuildIncidents(evaluateRules: false)
     }
 
@@ -592,16 +635,12 @@ final class AppViewModel: ObservableObject {
 
         if let nodeID=activeServerID,let persistenceStore {
             let newEvents=MonitoringEventBuilder.events(from:monitoringSamples.last,to:sample)
-            try? await persistenceStore.insert(sample:sample,nodeID:nodeID)
-            for event in newEvents { try? await persistenceStore.insert(event:LegacyModelAdapter.event(from:event,nodeID:nodeID)) }
-            monitoringSamples=(try? await persistenceStore.samples(nodeID:nodeID)) ?? monitoringSamples
-            let stored=(try? await persistenceStore.events(nodeID:nodeID)) ?? []
-            monitoringEvents=stored.filter{$0.kind=="monitoring"}.map{MonitoringEvent(id:$0.id,timestamp:$0.timestamp,component:$0.componentID,title:$0.title,detail:$0.detail,state:$0.state,recovered:$0.isRecovery)}
+            do{try await persistenceStore.insert(sample:sample,nodeID:nodeID);for event in newEvents{try await persistenceStore.insert(event:LegacyModelAdapter.event(from:event,nodeID:nodeID))};let cutoff=sample.timestamp.addingTimeInterval(-MonitoringHistory.retention);monitoringSamples.append(sample);monitoringSamples.removeAll{$0.timestamp<cutoff};monitoringEvents.append(contentsOf:newEvents);monitoringEvents.removeAll{$0.timestamp<cutoff};persistenceErrorMessage=nil}catch{persistenceErrorMessage=SecretRedactor.redact(error.localizedDescription)}
         } else {
             let result=await monitoringStore.record(host:settings.host,sample:sample)
             monitoringSamples=result.samples;monitoringEvents=result.events
         }
-        if let nodeID=activeServerID,let persistenceStore,lastPeerHistorySample.map({sample.timestamp.timeIntervalSince($0)>=30}) ?? true { for peer in wireGuard.peers { try? await persistenceStore.insert(peer:PeerHistorySample(nodeID:nodeID,id:UUID(),timestamp:sample.timestamp,peerID:peer.id,name:peer.name,vpnIP:peer.vpnIP,status:peer.status,receivedBytes:peer.receivedBytes,sentBytes:peer.sentBytes,latestHandshake:peer.latestHandshake)) };peerHistory=(try? await persistenceStore.peerHistory(nodeID:nodeID)) ?? peerHistory;lastPeerHistorySample=sample.timestamp }
+        if let nodeID=activeServerID,let persistenceStore,lastPeerHistorySample.map({sample.timestamp.timeIntervalSince($0)>=30}) ?? true { var added:[PeerHistorySample]=[];for peer in wireGuard.peers{let value=PeerHistorySample(nodeID:nodeID,id:UUID(),timestamp:sample.timestamp,peerID:peer.id,name:peer.name,vpnIP:peer.vpnIP,status:peer.status,receivedBytes:peer.receivedBytes,sentBytes:peer.sentBytes,latestHandshake:peer.latestHandshake);if(try? await persistenceStore.insert(peer:value)) != nil{added.append(value)}};peerHistory.append(contentsOf:added);peerHistory.removeAll{$0.timestamp<sample.timestamp.addingTimeInterval(-MonitoringHistory.retention)};lastPeerHistorySample=sample.timestamp }
         rebuildIncidents()
 
     }
@@ -617,32 +656,32 @@ final class AppViewModel: ObservableObject {
     private func scheduleRegularAgentSync(){guard agentSyncTask==nil,lastAgentSyncAttempt.map({Date().timeIntervalSince($0)>=60}) ?? true else{return};Task{await syncAgentHistory(force:false)}}
 
     private func syncAgentHistory(force:Bool=true) async {
-        if let agentSyncTask{await agentSyncTask.value;return}
+        if let agentSyncTask{_ = await agentSyncTask.value;return}
         guard force || lastAgentSyncAttempt.map({Date().timeIntervalSince($0)>=60}) ?? true else{return}
         guard let nodeID=activeServerID,let persistenceStore else{return}
+        let context=nodeOperations.capture(nodeID:nodeID)
         lastAgentSyncAttempt=Date()
         let configuration=self.configuration,service=agent,controller=agentSyncController
         let cursors=(try? await persistenceStore.agentSyncCursors(nodeID:nodeID)) ?? AgentSyncCursors()
-        let task=Task{[weak self] in
-            guard let self else{return}
-            let result=try? await controller.synchronize(nodeID:nodeID,cursors:cursors,service:service,configuration:configuration,store:persistenceStore)
-            if let result,result.imported>0{self.statusMessage="Imported \(result.imported) server observations"}
-        }
-        agentSyncTask=task;await task.value;agentSyncTask=nil
+        let token=UUID(),task=Task{try? await controller.synchronize(nodeID:nodeID,cursors:cursors,service:service,configuration:configuration,store:persistenceStore)}
+        agentSyncToken=token;agentSyncTask=task;let result=await task.value;if agentSyncToken==token{agentSyncTask=nil;agentSyncToken=nil}
+        guard !Task.isCancelled,nodeOperations.accepts(nodeID:nodeID,generation:context.1,activeNodeID:activeServerID)else{return}
+        lastAgentSyncAt=Date()
+        if let result,result.imported>0{statusMessage="Imported \(result.imported) server observations";await loadMonitoringHistory()}
     }
 
     var activeNodeName: String { servers.first(where: { $0.id == activeServerID })?.name ?? (system.hostname == "—" ? "VPS" : system.hostname) }
     func updateFleet() { if let id=activeServerID,let sample=monitoringSamples.last{lastKnownSamples[id]=sample};fleetSummaries = fleetController.summaries(profiles: servers, activeID: activeServerID, system: system, wireGuard: wireGuard, units: units, security: security, incidents: incidents, lastKnownSamples:lastKnownSamples) }
     func exposureName(_ endpoint: NetworkEndpoint) -> String { ExposureAnalyzer.displayName(endpoint, listeners: listeners) }
     private func currentBaseline(_ nodeID: UUID) -> ConfigurationBaseline { BaselineEngine.capture(nodeID: nodeID, endpoints: exposureEndpoints, units: units, wireGuard: wireGuard, ssh: security.ssh, hashes: currentConfigurationHashes) }
-    func setCurrentBaseline() async { guard let nodeID = activeServerID else { return }; let baseline = currentBaseline(nodeID); if let profile = servers.first(where: { $0.id == nodeID }), let persistenceStore { try? await persistenceStore.upsert(node: LegacyModelAdapter.node(from: profile)); try? await persistenceStore.save(baseline: baseline) }; configurationBaseline = baseline; baselineDrift = []; evaluateAlerts() }
-    func loadBaseline() async { guard let nodeID = activeServerID, let persistenceStore else { return }; configurationBaseline = try? await persistenceStore.latestBaseline(nodeID: nodeID); if let configurationBaseline { baselineDrift = BaselineEngine.diff(baseline: configurationBaseline, current: currentBaseline(nodeID)) } }
+    func setCurrentBaseline() async { guard let nodeID=activeServerID else{return};let context=nodeOperations.capture(nodeID:nodeID),baseline=currentBaseline(nodeID);do{if let profile=servers.first(where:{$0.id==nodeID}),let persistenceStore{try await persistenceStore.upsert(node:LegacyModelAdapter.node(from:profile));try await persistenceStore.save(baseline:baseline)};guard nodeOperations.accepts(nodeID:nodeID,generation:context.1,activeNodeID:activeServerID)else{return};configurationBaseline=baseline;baselineDrift=[];persistenceErrorMessage=nil;evaluateAlerts()}catch{if nodeOperations.accepts(nodeID:nodeID,generation:context.1,activeNodeID:activeServerID){persistenceErrorMessage=SecretRedactor.redact(error.localizedDescription)}} }
+    func loadBaseline() async { guard let nodeID=activeServerID,let persistenceStore else{return};let context=nodeOperations.capture(nodeID:nodeID);do{let loaded=try await persistenceStore.latestBaseline(nodeID:nodeID);guard nodeOperations.accepts(nodeID:nodeID,generation:context.1,activeNodeID:activeServerID)else{return};configurationBaseline=loaded;baselineDrift=loaded.map{BaselineEngine.diff(baseline:$0,current:currentBaseline(nodeID))} ?? [];persistenceErrorMessage=nil}catch{guard nodeOperations.accepts(nodeID:nodeID,generation:context.1,activeNodeID:activeServerID)else{return};configurationBaseline=nil;baselineDrift=[];persistenceErrorMessage="Baseline data could not be decoded: \(SecretRedactor.redact(error.localizedDescription))"} }
     private func configureDefaultAlerts() { guard let nodeID = activeServerID, alertRules.isEmpty else { return }; alertRules=AlertEngine.defaultRules(nodeID:nodeID,peerTimeout:settings.handshakeTimeout) }
-    private func evaluateAlerts() { let conditions:[AlertRuleKind:Bool]=[.nodeOffline:system.health == .offline,.wireGuardOffline:system.health == .online && wireGuard.state == .offline,.adGuardOffline:system.health == .online && monitoredUnitState{$0.name.localizedCaseInsensitiveContains("AdGuardHome")} == .offline,.antiZapretOffline:system.health == .online && monitoredUnitState{$0.name == "antizapret.service"} == .offline,.disk:system.diskPercent >= threshold(.disk,90),.memory:system.memoryPercent >= threshold(.memory,90),.ping:(system.pingMilliseconds ?? 0) >= threshold(.ping,250),.publicDNS:exposureEndpoints.contains{$0.port == 53 && $0.classification == .publicInternet},.newPublicListener:baselineDrift.contains{$0.category == "public-listener" && $0.kind == .added},.peerInactive:wireGuard.peers.contains{$0.status == .offline},.configurationDrift:!baselineDrift.isEmpty];let result=AlertEngine.evaluate(rules:alertRules,conditions:conditions,previous:alertStates);alertStates=result.states;alertEvents.append(contentsOf:result.events);if settings.notificationsEnabled{for event in result.events{NotificationService.send(title:event.title,body:event.detail,id:"tunneldeck-alert-\(event.id.uuidString)")}};if let nodeID=activeServerID,let persistenceStore{Task{try? await persistenceStore.save(alertStates:result.states,nodeID:nodeID);for event in result.events{try? await persistenceStore.insert(event:event)}}} }
+    private func evaluateAlerts() { let conditions:[AlertRuleKind:Bool]=[.nodeOffline:system.health == .offline,.wireGuardOffline:system.health == .online && wireGuard.state == .offline,.adGuardOffline:system.health == .online && monitoredUnitState{$0.name.localizedCaseInsensitiveContains("AdGuardHome")} == .offline,.antiZapretOffline:system.health == .online && monitoredUnitState{$0.name == "antizapret.service"} == .offline,.disk:system.diskPercent >= threshold(.disk,90),.memory:system.memoryPercent >= threshold(.memory,90),.ping:(system.pingMilliseconds ?? 0) >= threshold(.ping,250),.publicDNS:exposureEndpoints.contains{$0.port == 53 && $0.classification == .publicInternet},.newPublicListener:baselineDrift.contains{$0.category == "public-listener" && $0.kind == .added},.peerInactive:wireGuard.peers.contains{$0.status == .offline},.configurationDrift:!baselineDrift.isEmpty];let result=AlertEngine.evaluate(rules:alertRules,conditions:conditions,previous:alertStates);alertStates=result.states;alertEvents.append(contentsOf:result.events);if alertEvents.count>500{alertEvents.removeFirst(alertEvents.count-500)};if settings.notificationsEnabled{for event in result.events{NotificationService.send(title:event.title,body:event.detail,id:"tunneldeck-alert-\(event.id.uuidString)")}};if let nodeID=activeServerID,let persistenceStore{Task{try? await persistenceStore.save(alertStates:result.states,nodeID:nodeID);for event in result.events{try? await persistenceStore.insert(event:event)}}} }
     private func threshold(_ kind:AlertRuleKind,_ fallback:Double)->Double{alertRules.first{$0.kind==kind}?.threshold ?? fallback}
-    func saveAlertRules(){guard let nodeID=activeServerID,let persistenceStore else{return};let rules=alertRules;Task{try? await persistenceStore.save(alertRules:rules,nodeID:nodeID)}}
+    func saveAlertRules(){guard let nodeID=activeServerID,let persistenceStore else{return};let generation=nodeOperations.capture(nodeID:nodeID).1,rules=alertRules;alertSaveTask?.cancel();alertSaveTask=Task{[weak self] in do{try await Task.sleep(for:.milliseconds(350));try Task.checkCancellation();try await persistenceStore.save(alertRules:rules,nodeID:nodeID);guard let self,self.nodeOperations.accepts(nodeID:nodeID,generation:generation,activeNodeID:self.activeServerID)else{return};self.persistenceErrorMessage=nil}catch is CancellationError{}catch{guard let self,self.nodeOperations.accepts(nodeID:nodeID,generation:generation,activeNodeID:self.activeServerID)else{return};self.persistenceErrorMessage=SecretRedactor.redact(error.localizedDescription)}}}
     func acknowledge(_ id: UUID) { guard var state=alertStates[id] else{return}; state.acknowledgedAt=Date(); alertStates[id]=state;if let nodeID=activeServerID,let persistenceStore{let states=alertStates;Task{try? await persistenceStore.save(alertStates:states,nodeID:nodeID)}} }
-    private func sampleAdGuardHistoryIfNeeded()async{let now=Date();guard lastAdGuardHistorySample.map({now.timeIntervalSince($0)>=60}) ?? true else{return};await refreshAdGuardAPI();guard adGuard.available,let nodeID=activeServerID,let persistenceStore else{return};let sample=AdGuardHistorySample(nodeID:nodeID,id:UUID(),timestamp:now,totalQueries:adGuard.totalQueries,blockedQueries:adGuard.blockedQueries,blockedPercentage:adGuard.blockedPercentage,averageProcessingTime:adGuard.averageProcessingTime);try? await persistenceStore.insert(adGuard:sample);adGuardHistory=(try? await persistenceStore.adGuardHistory(nodeID:nodeID)) ?? adGuardHistory;lastAdGuardHistorySample=now}
+    private func sampleAdGuardHistoryIfNeeded()async{let now=Date();guard lastAdGuardHistorySample.map({now.timeIntervalSince($0)>=60}) ?? true else{return};let nodeID=activeServerID,context=nodeOperations.capture(nodeID:nodeID);await refreshAdGuardAPI();guard let nodeID,adGuard.available,let persistenceStore,nodeOperations.accepts(nodeID:nodeID,generation:context.1,activeNodeID:activeServerID)else{return};let sample=AdGuardHistorySample(nodeID:nodeID,id:UUID(),timestamp:now,totalQueries:adGuard.totalQueries,blockedQueries:adGuard.blockedQueries,blockedPercentage:adGuard.blockedPercentage,averageProcessingTime:adGuard.averageProcessingTime);do{try await persistenceStore.insert(adGuard:sample);guard nodeOperations.accepts(nodeID:nodeID,generation:context.1,activeNodeID:activeServerID)else{return};adGuardHistory.append(sample);adGuardHistory.removeAll{$0.timestamp<now.addingTimeInterval(-MonitoringHistory.retention)};lastAdGuardHistorySample=now}catch{persistenceErrorMessage=SecretRedactor.redact(error.localizedDescription)}}
 
     func testSSH() async -> Bool {
         let result = await execute(.uname, subsystem: "SSH Test")
@@ -653,20 +692,24 @@ final class AppViewModel: ObservableObject {
     func runDiagnostic(_ command: ReadCommand, name: String) async {
         let result = await execute(command, subsystem: "Diagnostics")
         let diagnostic = DiagnosticResult(id: UUID(), date: Date(), name: name, success: result.succeeded, summary: (result.stdout.nonEmpty ?? result.stderr).trimmingCharacters(in: .whitespacesAndNewlines), milliseconds: result.duration * 1000)
-        diagnostics.append(diagnostic); await history.append(diagnostic)
+        diagnostics.append(diagnostic);if diagnostics.count>500{diagnostics.removeFirst(diagnostics.count-500)};await history.append(diagnostic)
     }
 
-    func execute(_ command: ReadCommand, subsystem: String) async -> CommandResult {
+    func execute(_ command: ReadCommand, subsystem: String, configuration: SSHConfiguration? = nil) async -> CommandResult {
         do {
-            let result = try await ssh.execute(command, configuration: configuration)
-            logs.insert(LogEntry(timestamp: Date(), subsystem: subsystem, command: command.rawValue, stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode), at: 0)
+            let result = try await ssh.execute(command, configuration: configuration ?? self.configuration)
+            appendLog(LogEntry(timestamp: Date(), subsystem: subsystem, command: command.rawValue, stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode))
             return result
         } catch {
             let message = SecretRedactor.redact(error.localizedDescription)
-            logs.insert(LogEntry(timestamp: Date(), subsystem: subsystem, command: command.rawValue, stdout: "", stderr: message, exitCode: -1), at: 0)
+            appendLog(LogEntry(timestamp: Date(), subsystem: subsystem, command: command.rawValue, stdout: "", stderr: message, exitCode: -1))
             return CommandResult(stdout: "", stderr: message, exitCode: -1, duration: 0)
         }
     }
+
+    private func executeIf(_ enabled:Bool,_ command:ReadCommand,subsystem:String,configuration:SSHConfiguration)async->CommandResult{guard enabled else{return CommandResult(stdout:"",stderr:"",exitCode:0,duration:0)};return await execute(command,subsystem:subsystem,configuration:configuration)}
+
+    private func appendLog(_ entry: LogEntry) { logs.insert(entry,at:0);if logs.count>1_000{logs.removeLast(logs.count-1_000)} }
 
     private func parseWireGuardAddress(_ value: String) -> String {
         let fields = value.split(whereSeparator: \.isWhitespace)
@@ -683,11 +726,7 @@ final class AppViewModel: ObservableObject {
         guard values.count >= 4 else { return system.cpuPercent }
         let idle = values[3] + (values.count > 4 ? values[4] : 0)
         let total = values.reduce(0, +)
-        defer { previousCPUTicks = (idle, total) }
-        guard let previousCPUTicks else { return 0 }
-        let totalDelta = total - previousCPUTicks.total
-        guard totalDelta > 0 else { return system.cpuPercent }
-        return max(0, min(100, (1 - (idle - previousCPUTicks.idle) / totalDelta) * 100))
+        return cpuDeltaTracker.percentage(idle:idle,total:total,fallback:system.cpuPercent)
     }
 }
 

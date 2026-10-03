@@ -18,27 +18,8 @@ struct DoctorView: View {
 struct MonitoringView: View {
     @EnvironmentObject var model: AppViewModel
 
-    private var filteredSamples: [MonitoringSample] {
-        MonitoringHistory.filtered(model.monitoringSamples, hours: model.monitoringWindowHours, timestamp: \MonitoringSample.timestamp)
-    }
-
-    private var historyCutoff: Date {
-        Date().addingTimeInterval(-Double(model.monitoringWindowHours) * 3600)
-    }
-
-    private var peerIDsInWindow: [String] {
-        Array(Set(model.peerHistory.filter { $0.timestamp >= historyCutoff }.map(\.peerID))).sorted()
-    }
-
-    private func peerPoints(_ peerID: String) -> [PeerHistorySample] {
-        model.peerHistory.filter { $0.peerID == peerID && $0.timestamp >= historyCutoff }.sorted { $0.timestamp < $1.timestamp }
-    }
-
-    private var filteredAdGuardHistory: [AdGuardHistorySample] {
-        model.adGuardHistory.filter { $0.timestamp >= historyCutoff }.sorted { $0.timestamp < $1.timestamp }
-    }
-
     var body: some View {
+        let presentation = MonitoringPresentation.build(samples: model.monitoringSamples, peers: model.peerHistory, adGuard: model.adGuardHistory, hours: model.monitoringWindowHours, expectedInterval: model.settings.pollingInterval)
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 MetricCard(title: "Background monitoring", icon: "waveform.path.ecg") {
@@ -80,18 +61,18 @@ struct MonitoringView: View {
                         .pickerStyle(.segmented)
                         .frame(maxWidth: 420)
 
-                        if filteredSamples.isEmpty {
+                        if presentation.samples.isEmpty {
                             emptyHistory(last: model.monitoringSamples.last?.timestamp, noun: "samples")
                         } else {
                             HStack(spacing: 24) {
-                                averageMetric("CPU avg", filteredSamples.map(\.cpuPercent))
-                                averageMetric("RAM avg", filteredSamples.map(\.memoryPercent))
-                                averageMetric("Disk avg", filteredSamples.map(\.diskPercent))
-                                averageMetric("Ping avg", filteredSamples.compactMap(\.pingMilliseconds), suffix: " ms")
+                                averageMetric("CPU avg", presentation.samples.map(\.cpuPercent))
+                                averageMetric("RAM avg", presentation.samples.map(\.memoryPercent))
+                                averageMetric("Disk avg", presentation.samples.map(\.diskPercent))
+                                averageMetric("Ping avg", presentation.samples.compactMap(\.pingMilliseconds), suffix: " ms")
                             }
 
                             Chart {
-                                ForEach(Array(MonitoringHistory.segments(filteredSamples, expectedInterval: model.settings.pollingInterval, timestamp: \MonitoringSample.timestamp).enumerated()), id: \.offset) { segment, points in
+                                ForEach(Array(presentation.sampleSegments.enumerated()), id: \.offset) { segment, points in
                                     ForEach(points) { sample in
                                         LineMark(x: .value("Time", sample.timestamp), y: .value("Percent", sample.cpuPercent), series: .value("Series", "CPU-\(segment)"))
                                             .foregroundStyle(by: .value("Metric", "CPU"))
@@ -106,14 +87,12 @@ struct MonitoringView: View {
                             .chartLegend(position: .bottom)
                             .frame(height: 230)
 
-                            let pingSamples = filteredSamples.filter { $0.pingMilliseconds != nil }
-                            if !pingSamples.isEmpty {
+                            if !presentation.pingSegments.isEmpty {
                                 Text("VPS internet latency").font(.headline)
-                                Chart(pingSamples) { sample in
-                                    LineMark(
-                                        x: .value("Time", sample.timestamp),
-                                        y: .value("Ping", sample.pingMilliseconds ?? 0)
-                                    )
+                                Chart {
+                                    ForEach(Array(presentation.pingSegments.enumerated()),id:\.offset){segment,points in
+                                        ForEach(points){sample in LineMark(x:.value("Time",sample.timestamp),y:.value("Ping",sample.pingMilliseconds ?? 0),series:.value("Segment",segment))}
+                                    }
                                 }
                                 .frame(height: 150)
                             }
@@ -123,11 +102,11 @@ struct MonitoringView: View {
 
                 MetricCard(title: "WireGuard peer history", icon: "point.3.connected.trianglepath.dotted") {
                     VStack(alignment: .leading, spacing: 10) {
-                        if peerIDsInWindow.isEmpty {
+                        if presentation.peerGroups.isEmpty {
                             emptyHistory(last: model.peerHistory.last?.timestamp, noun: "peer samples")
                         } else {
-                            ForEach(peerIDsInWindow, id: \.self) { peerID in
-                                let points = peerPoints(peerID)
+                            ForEach(presentation.peerGroups, id: \.id) { group in
+                                let points = group.samples
                                 if let latest = points.last {
                                     HStack(alignment: .top, spacing: 10) {
                                         StatusDot(state: latest.status)
@@ -152,20 +131,19 @@ struct MonitoringView: View {
 
                 MetricCard(title: "AdGuard history", icon: "shield.checkered") {
                     VStack(alignment: .leading, spacing: 12) {
-                        if filteredAdGuardHistory.isEmpty {
+                        if presentation.adGuard.isEmpty {
                             emptyHistory(last: model.adGuardHistory.last?.timestamp, noun: "AdGuard samples")
                         } else {
                             HStack(spacing: 24) {
-                                incidentMetric("Queries", String(AdGuardHistoryAnalytics.queryDelta(filteredAdGuardHistory)))
-                                incidentMetric("Blocked", String(AdGuardHistoryAnalytics.blockedDelta(filteredAdGuardHistory)))
-                                incidentMetric("Blocked %", String(format: "%.1f%%", filteredAdGuardHistory.last?.blockedPercentage ?? 0))
-                                incidentMetric("Avg processing", String(format: "%.2f ms", (filteredAdGuardHistory.last?.averageProcessingTime ?? 0) * 1000))
+                                incidentMetric("Queries", String(AdGuardHistoryAnalytics.queryDelta(presentation.adGuard)))
+                                incidentMetric("Blocked", String(AdGuardHistoryAnalytics.blockedDelta(presentation.adGuard)))
+                                incidentMetric("Blocked %", String(format: "%.1f%%", presentation.adGuard.last?.blockedPercentage ?? 0))
+                                incidentMetric("Avg processing", String(format: "%.2f ms", (presentation.adGuard.last?.averageProcessingTime ?? 0) * 1000))
                             }
-                            Chart(filteredAdGuardHistory) { sample in
-                                LineMark(
-                                    x: .value("Time", sample.timestamp),
-                                    y: .value("Blocked %", sample.blockedPercentage)
-                                )
+                            Chart {
+                                ForEach(Array(presentation.adGuardSegments.enumerated()),id:\.offset){segment,points in
+                                    ForEach(points){sample in LineMark(x:.value("Time",sample.timestamp),y:.value("Blocked %",sample.blockedPercentage),series:.value("Segment",segment))}
+                                }
                             }
                             .chartYScale(domain: 0...100)
                             .frame(height: 170)
