@@ -1,9 +1,13 @@
 import Foundation
 
 struct HelperStatus: Codable, Sendable { let version: String }
-struct HelperCapabilities: Codable, Sendable {
+struct LegacyHelperCapabilities: Codable, Sendable {
     let version: String; let protocolVersion: Int; let capabilities: Set<String>
-    static func legacy(version: String) -> HelperCapabilities { HelperCapabilities(version: version, protocolVersion: 1, capabilities: ["legacy-safe-writes"]) }
+    static func legacy(version: String) -> LegacyHelperCapabilities { LegacyHelperCapabilities(version: version, protocolVersion: 1, capabilities: ["legacy-safe-writes"]) }
+    func supports(_ capability: String) -> Bool { capabilities.contains(capability) }
+}
+struct Helper2Capabilities: Codable, Sendable {
+    let version: String; let protocolVersion: Int; let capabilities: Set<String>
     func supports(_ capability: String) -> Bool { capabilities.contains(capability) }
 }
 struct HelperPeer: Codable, Sendable, Identifiable {
@@ -18,9 +22,7 @@ actor HelperService {
     private let ssh: SSHService
     init(ssh: SSHService) { self.ssh = ssh }
 
-    func capabilities(configuration: SSHConfiguration) async -> HelperCapabilities? {
-        if let result = try? await ssh.executeHelper(.info, configuration: configuration), result.succeeded,
-           let info = try? JSONDecoder().decode(HelperCapabilities.self, from: Data(result.stdout.utf8)) { return info }
+    func capabilities(configuration: SSHConfiguration) async -> LegacyHelperCapabilities? {
         if case .success(let version) = await version(configuration: configuration) { return .legacy(version: version) }
         return nil
     }
@@ -89,6 +91,21 @@ actor HelperService {
             throw NSError(domain: "TunnelDeck.Helper", code: Int(result.exitCode), userInfo: [NSLocalizedDescriptionKey: result.stdout + result.stderr])
         }
         return try JSONDecoder().decode(RestoreResult.self, from: Data(result.stdout.utf8))
+    }
+}
+
+actor Helper2Service {
+    private let ssh: SSHService
+    init(ssh: SSHService) { self.ssh = ssh }
+
+    func capabilities(configuration: SSHConfiguration) async -> Helper2Capabilities? {
+        guard let result = try? await ssh.executeHelper2(.info, configuration: configuration) else { return nil }
+        return Self.decodeCapabilities(result)
+    }
+
+    nonisolated static func decodeCapabilities(_ result: CommandResult) -> Helper2Capabilities? {
+        guard result.succeeded else { return nil }
+        return try? JSONDecoder().decode(Helper2Capabilities.self, from: Data(result.stdout.utf8))
     }
 }
 

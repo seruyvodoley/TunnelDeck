@@ -19,7 +19,8 @@ final class AppViewModel: ObservableObject {
     @Published var showOnboarding: Bool
     @Published var statusMessage = "Read-only mode"
     @Published var helperVersion: String?
-    @Published var helperCapabilities: HelperCapabilities?
+    @Published var helperCapabilities: LegacyHelperCapabilities?
+    @Published var helper2Capabilities: Helper2Capabilities?
     @Published var helperError: AppError?
     @Published var backups: [BackupRecord] = []
     @Published var presentedError: AppError?
@@ -64,6 +65,8 @@ final class AppViewModel: ObservableObject {
     let adGuardAPI = AdGuardAPIService()
     let localDNS = LocalDNSService()
     lazy var helper = HelperService(ssh: ssh)
+    lazy var helper2 = Helper2Service(ssh: ssh)
+    lazy var remediationController = RemediationController(helper2: helper2)
     lazy var agent = AgentService(ssh: ssh)
     private let history = DiagnosticHistoryStore()
     private let activityStore = ActivityStore()
@@ -225,14 +228,17 @@ final class AppViewModel: ObservableObject {
 
     func refreshHelper() async {
         let context=nodeOperations.capture(nodeID:activeServerID),capturedConfiguration=configuration
+        let loadedHelper2=await remediationController.capabilities(configuration:capturedConfiguration)
         if let capabilities = await helper.capabilities(configuration: capturedConfiguration) {
             let loadedBackups=(try? await helper.listBackups(configuration:capturedConfiguration)) ?? []
             let loadedPeers=(try? await helper.peers(configuration:capturedConfiguration)) ?? []
             guard nodeOperations.accepts(nodeID:context.0,generation:context.1,activeNodeID:activeServerID) else{return}
+            helper2Capabilities=loadedHelper2
             helperCapabilities = capabilities; helperVersion = capabilities.version; helperError = nil
             backups=loadedBackups;managedPeers=loadedPeers
         } else {
             guard nodeOperations.accepts(nodeID:context.0,generation:context.1,activeNodeID:activeServerID) else{return}
+            helper2Capabilities=loadedHelper2
             helperCapabilities = nil; helperVersion = nil; helperError = AppError(title: "Helper check failed", message: "TunnelDeck could not negotiate helper capabilities.", technicalDetails: "No compatible helper-info or legacy version response.", recommendedAction: "Verify SSH access and the installed helper.")
         }
     }
