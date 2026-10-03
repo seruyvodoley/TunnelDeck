@@ -42,7 +42,7 @@ struct ServicesView: View {
             Text("TunnelDeck will create a scoped backup, \(state.action) \(state.unit), and verify its resulting state. Network services may briefly disconnect.")
         }
     }
-    private func canWrite(_ unit: UnitStatus) -> Bool { model.settings.writeModeEnabled && model.helperVersion == HelperService.localVersion && unit.activeState != "not-found" && !unit.name.hasSuffix(".timer") }
+    private func canWrite(_ unit: UnitStatus) -> Bool { model.settings.writeModeEnabled && model.helperCanUseLegacyWrites && unit.activeState != "not-found" && !unit.name.hasSuffix(".timer") }
 }
 
 struct SecurityView: View {
@@ -215,7 +215,7 @@ struct BackupsView: View {
                 Spacer()
                 if let helperVersion = model.helperVersion { Text("Helper \(helperVersion)").foregroundStyle(.secondary) }
                 Button("Create Emergency Kit") { state.showEmergencyKit = true }
-                Button("Backup Now") { Task { _ = await model.createBackup(operation: "manual") } }.disabled(!model.settings.writeModeEnabled || model.helperVersion != HelperService.localVersion)
+                Button("Backup Now") { Task { _ = await model.createBackup(operation: "manual") } }.disabled(!model.settings.writeModeEnabled || !model.helperCanUseLegacyWrites)
                 Button("Refresh") { Task { await model.refreshHelper() } }
             }.padding()
             if model.helperVersion == nil {
@@ -227,7 +227,7 @@ struct BackupsView: View {
                     TableColumn("Host", value: \.hostname)
                     TableColumn("Files") { Text(String($0.files.count)) }
                     TableColumn("Size") { Text(ByteCountFormatter.string(fromByteCount: $0.size, countStyle: .file)) }
-                    TableColumn("Actions") { backup in HStack { Button("Download") { Task { await model.downloadBackup(backup) } }; Button("Preview Restore") { state.selectedBackup = backup; Task { await model.previewRestore(backup, type: state.restoreType); state.showRestore = model.restorePreview != nil } }.disabled(model.helperVersion != HelperService.localVersion) } }
+                    TableColumn("Actions") { backup in HStack { Button("Download") { Task { await model.downloadBackup(backup) } }; Button("Preview Restore") { state.selectedBackup = backup; Task { await model.previewRestore(backup, type: state.restoreType); state.showRestore = model.restorePreview != nil } }.disabled(!model.helperCanUseLegacyWrites) } }
                 }
                 Picker("Restore type", selection: $state.restoreType) { Text("WireGuard").tag("wireguard"); Text("AdGuard").tag("adguard"); Text("AntiZapret").tag("antizapret") }.pickerStyle(.segmented).padding(8)
             }

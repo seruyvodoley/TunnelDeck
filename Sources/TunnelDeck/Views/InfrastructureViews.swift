@@ -32,7 +32,7 @@ struct WireGuardView: View {
             Button("Remove peer", role: .destructive) { if let key = state.selection.first { Task { _ = await model.removePeer(publicKey: key, deleteClient: state.deleteClient, allowExisting: model.managedPeers.first(where: { $0.publicKey == key }) == nil) } } }
         } message: { Text("TunnelDeck will create a backup, remove the exact public key from wg0.conf and the live interface, then run a health check. Existing peers require elevated confirmation.") }
     }
-    private var canWrite: Bool { model.settings.writeModeEnabled && model.helperVersion == HelperService.localVersion }
+    private var canWrite: Bool { model.settings.writeModeEnabled && model.helperCanUseLegacyWrites }
 }
 
 @MainActor
@@ -72,7 +72,7 @@ struct ProfilesView: View {
 
 struct AntiZapretView: View {
     @EnvironmentObject var model: AppViewModel
-    var body: some View { ScrollView { VStack(alignment: .leading, spacing: 18) { Text("Services").font(.title2.bold()); ForEach(model.units.filter { $0.name.contains("antizapret") || $0.name.contains("vpn-udp") || $0.name.contains("wg-quick@vpn") }) { unit in HStack { StatusDot(state: unit.health); Text(unit.name); Spacer(); Text("\(unit.activeState) / \(unit.subState)").foregroundStyle(.secondary) }.padding(10).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10)) }; Text("Setup flags").font(.title2.bold()); Grid(alignment: .leading, horizontalSpacing: 30, verticalSpacing: 10) { ForEach(model.antiZapretSettings.keys.sorted(), id: \.self) { key in GridRow { Text(key).foregroundStyle(.secondary); Text(model.antiZapretSettings[key] ?? "—").textSelection(.enabled) } } }; HStack { Button("View Logs") { model.selectedSection = .logs }; Button("Restart") { Task { _ = await model.performServiceAction("restart", unit: "antizapret.service") } }.disabled(!model.settings.writeModeEnabled || model.helperVersion != HelperService.localVersion); Button("Update Lists (not implemented)") {}.disabled(true) } }.padding(20).frame(maxWidth: 850, alignment: .leading) } }
+    var body: some View { ScrollView { VStack(alignment: .leading, spacing: 18) { Text("Services").font(.title2.bold()); ForEach(model.units.filter { $0.name.contains("antizapret") || $0.name.contains("vpn-udp") || $0.name.contains("wg-quick@vpn") }) { unit in HStack { StatusDot(state: unit.health); Text(unit.name); Spacer(); Text("\(unit.activeState) / \(unit.subState)").foregroundStyle(.secondary) }.padding(10).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10)) }; Text("Setup flags").font(.title2.bold()); Grid(alignment: .leading, horizontalSpacing: 30, verticalSpacing: 10) { ForEach(model.antiZapretSettings.keys.sorted(), id: \.self) { key in GridRow { Text(key).foregroundStyle(.secondary); Text(model.antiZapretSettings[key] ?? "—").textSelection(.enabled) } } }; HStack { Button("View Logs") { model.selectedSection = .logs }; Button("Restart") { Task { _ = await model.performServiceAction("restart", unit: "antizapret.service") } }.disabled(!model.settings.writeModeEnabled || !model.helperCanUseLegacyWrites); Button("Update Lists (not implemented)") {}.disabled(true) } }.padding(20).frame(maxWidth: 850, alignment: .leading) } }
 }
 
 struct DNSView: View {

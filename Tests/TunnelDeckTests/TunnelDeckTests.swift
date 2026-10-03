@@ -450,5 +450,26 @@ import Testing
     let root=FileManager.default.temporaryDirectory.appendingPathComponent("TunnelDeckLegacyTelemetry-\(UUID().uuidString)"),telemetry=root.appendingPathComponent("Telemetry"),alerts=root.appendingPathComponent("Alerts");try FileManager.default.createDirectory(at:telemetry,withIntermediateDirectories:true);try FileManager.default.createDirectory(at:alerts,withIntermediateDirectories:true);defer{try? FileManager.default.removeItem(at:root)}
     let node=InfrastructureNode(id:UUID(),name:"Legacy",role:.primary,customRole:nil,host:"legacy.invalid",sshPort:22,createdAt:Date(),updatedAt:Date(),enabled:true),now=Date();let peer=PeerHistorySample(nodeID:node.id,id:UUID(),timestamp:now,peerID:"public",name:"Peer",vpnIP:"10.0.0.2/32",status:.online,receivedBytes:1,sentBytes:2,latestHandshake:now),dns=AdGuardHistorySample(nodeID:node.id,id:UUID(),timestamp:now,totalQueries:10,blockedQueries:2,blockedPercentage:20,averageProcessingTime:0.001)
     var peerJSON=try JSONSerialization.jsonObject(with:JSONEncoder().encode([peer])) as! [[String:Any]];peerJSON[0].removeValue(forKey:"nodeID");try JSONSerialization.data(withJSONObject:peerJSON).write(to:telemetry.appendingPathComponent("peers-legacy.invalid.json"));var dnsJSON=try JSONSerialization.jsonObject(with:JSONEncoder().encode([dns])) as! [[String:Any]];dnsJSON[0].removeValue(forKey:"nodeID");try JSONSerialization.data(withJSONObject:dnsJSON).write(to:telemetry.appendingPathComponent("adguard-legacy.invalid.json"));let legacyRule:[[String:Any]]=[["kind":"diskPercent","enabled":true,"threshold":82.0,"cooldownMinutes":15],["kind":"serviceOffline","enabled":false,"threshold":0.0,"cooldownMinutes":22]];try JSONSerialization.data(withJSONObject:legacyRule).write(to:alerts.appendingPathComponent("rules-legacy.invalid.json"))
-    let store=try InfrastructureStore(url:root.appendingPathComponent("db.sqlite3"));try await store.upsert(node:node);let importer=LegacyTelemetryImporter(folder:telemetry);try await importer.importHistory(for:node,into:store);try await importer.importHistory(for:node,into:store);#expect(try await store.peerHistory(nodeID:node.id).count==1);#expect(try await store.adGuardHistory(nodeID:node.id).count==1);let rules=try await LegacyAlertImporter(folder:alerts).rules(for:node);let byKind=Dictionary(uniqueKeysWithValues:rules.map{($0.kind,$0)});#expect(byKind[.disk]?.threshold == 82);#expect(byKind[.disk]?.nodeID == node.id);#expect(byKind[.adGuardOffline]?.enabled == false);#expect(byKind[.antiZapretOffline]?.enabled == false);#expect(byKind[.adGuardOffline]?.cooldown == 22*60);#expect(byKind[.antiZapretOffline]?.cooldown == 22*60)
+    let store=try InfrastructureStore(url:root.appendingPathComponent("db.sqlite3"));try await store.upsert(node:node);let importer=LegacyTelemetryImporter(folder:telemetry);try await importer.importHistory(for:node,into:store);try await importer.importHistory(for:node,into:store);#expect(try await store.peerHistory(nodeID:node.id).count==1);#expect(try await store.adGuardHistory(nodeID:node.id).count==1);let rules=try await LegacyAlertImporter(folder:alerts).rules(for:node);let byKind=Dictionary(uniqueKeysWithValues:rules.map{($0.kind,$0)});#expect(byKind[.disk]?.threshold == 82);#expect(byKind[.disk]?.nodeID == node.id);#expect(byKind[.adGuardOffline]?.enabled == false);#expect(byKind[.antiZapretOffline]?.enabled == false);#expect(abs((byKind[.adGuardOffline]?.cooldown ?? 0)-1320)<0.001);#expect(abs((byKind[.antiZapretOffline]?.cooldown ?? 0)-1320)<0.001)
+}
+
+@Test func historyWindowsDistinguishFilteredFromMissingAndIncludeSevenDays() {
+    let now=Date(),old=MonitoringSample(nodeID:UUID(),id:UUID(),timestamp:now.addingTimeInterval(-7*3600),cpuPercent:1,memoryPercent:2,diskPercent:3,pingMilliseconds:nil,vpsState:.online,wireGuardState:.online,adGuardState:.online,antiZapretState:.online,publicDNSExposed:false,publicListeners:[])
+    #expect(MonitoringHistory.filtered([old],hours:6,now:now,timestamp:\.timestamp).isEmpty)
+    #expect(![old].isEmpty)
+    #expect(MonitoringHistory.filtered([old],hours:168,now:now,timestamp:\.timestamp).count == 1)
+}
+
+@Test func observationFreshnessDoesNotConvertStaleToOffline() {
+    let now=Date(),fresh=ObservationFreshness(lastObservedAt:now.addingTimeInterval(-30),now:now,staleAfter:120),stale=ObservationFreshness(lastObservedAt:now.addingTimeInterval(-3600),now:now,staleAfter:120),unknown=ObservationFreshness(lastObservedAt:nil,now:now,staleAfter:120)
+    #expect(fresh.state == .live);#expect(stale.state == .stale);#expect(unknown.state == .unknown)
+}
+
+@Test func monitoringSeriesBreakAcrossSleepGap() {
+    let now=Date(),node=UUID();func sample(_ offset:TimeInterval)->MonitoringSample{MonitoringSample(nodeID:node,id:UUID(),timestamp:now.addingTimeInterval(offset),cpuPercent:1,memoryPercent:2,diskPercent:3,pingMilliseconds:nil,vpsState:.online,wireGuardState:.online,adGuardState:.online,antiZapretState:.online,publicDNSExposed:false,publicListeners:[])}
+    #expect(MonitoringHistory.segments([sample(-3600),sample(-3570),sample(0)],expectedInterval:30,timestamp:\.timestamp).count == 2)
+}
+
+@MainActor @Test func pollingCoordinatorReplacesExistingLoop() async {
+    let coordinator=PollingCoordinator();coordinator.start(interval:{3600},operation:{});let first=coordinator.generation;coordinator.start(interval:{3600},operation:{});#expect(coordinator.generation == first+1);coordinator.stop()
 }

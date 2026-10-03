@@ -1,6 +1,8 @@
 # TunnelDeck 2.0.0
 
-> The `feature/tunneldeck-2.0` branch is an architecture preview. It preserves the 1.x dashboard and helper 1.2.1 compatibility while adding a local, read-only-first fleet operations layer.
+TunnelDeck distinguishes live, stale, unknown, and explicitly observed offline state. Local charts retain seven days, explain Mac sleep gaps, and never synthesize missing observations. The optional Server Agent 2.0 design adds cursor-based catch-up history while keeping read-only collection separate from Helper 2.0 transactional remediation. See `SERVER_AGENT.md`, `HELPER_PROTOCOL.md`, and `SECURITY_MODEL.md`; nothing is installed automatically.
+
+TunnelDeck preserves helper 1.2.1 compatibility while adding a local, read-only-first fleet operations layer. Agent/Helper 2.0 deployment remains an explicitly separate, preview-first operation.
 
 ## TunnelDeck 2.0.0 release notes
 

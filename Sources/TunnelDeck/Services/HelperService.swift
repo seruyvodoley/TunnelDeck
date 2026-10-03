@@ -1,6 +1,11 @@
 import Foundation
 
 struct HelperStatus: Codable, Sendable { let version: String }
+struct HelperCapabilities: Codable, Sendable {
+    let version: String; let protocolVersion: Int; let capabilities: Set<String>
+    static func legacy(version: String) -> HelperCapabilities { HelperCapabilities(version: version, protocolVersion: 1, capabilities: ["legacy-safe-writes"]) }
+    func supports(_ capability: String) -> Bool { capabilities.contains(capability) }
+}
 struct HelperPeer: Codable, Sendable, Identifiable {
     var id: String { publicKey }
     let publicKey: String; let name: String; let ip: String; let endpoint: String; let latestHandshake: Int64; let rx: UInt64; let tx: UInt64; let managedBy: String; let created: String?
@@ -12,6 +17,13 @@ actor HelperService {
     static let localVersion = "1.2.1"
     private let ssh: SSHService
     init(ssh: SSHService) { self.ssh = ssh }
+
+    func capabilities(configuration: SSHConfiguration) async -> HelperCapabilities? {
+        if let result = try? await ssh.executeHelper(.info, configuration: configuration), result.succeeded,
+           let info = try? JSONDecoder().decode(HelperCapabilities.self, from: Data(result.stdout.utf8)) { return info }
+        if case .success(let version) = await version(configuration: configuration) { return .legacy(version: version) }
+        return nil
+    }
 
     func version(configuration: SSHConfiguration) async -> Result<String, AppError> {
         do {

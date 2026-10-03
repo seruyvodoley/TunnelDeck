@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 import SwiftUI
 
 @MainActor
@@ -18,6 +19,7 @@ final class AppViewModel: ObservableObject {
     @Published var showOnboarding: Bool
     @Published var statusMessage = "Read-only mode"
     @Published var helperVersion: String?
+    @Published var helperCapabilities: HelperCapabilities?
     @Published var helperError: AppError?
     @Published var backups: [BackupRecord] = []
     @Published var presentedError: AppError?
@@ -51,20 +53,26 @@ final class AppViewModel: ObservableObject {
     @Published var alertEvents: [InfrastructureEvent] = []
     @Published var peerHistory: [PeerHistorySample] = []
     @Published var adGuardHistory: [AdGuardHistorySample] = []
+    @Published var lastKnownSamples: [UUID: MonitoringSample] = [:]
 
     let ssh = SSHService()
     let adGuardAPI = AdGuardAPIService()
     let localDNS = LocalDNSService()
     lazy var helper = HelperService(ssh: ssh)
+    lazy var agent = AgentService(ssh: ssh)
     private let history = DiagnosticHistoryStore()
     private let activityStore = ActivityStore()
     private let monitoringStore = MonitoringHistoryStore()
     private let fleetController = FleetController()
+    private let agentSyncController = AgentSyncController()
+    private let pollingCoordinator = PollingCoordinator()
     private let persistenceStore = try? InfrastructureStore()
     private var currentConfigurationHashes: [String: String] = [:]
     private var lastPeerHistorySample: Date?
     private var lastAdGuardHistorySample: Date?
-    private var pollTask: Task<Void, Never>?
+    private var lifecycleObservers: [NSObjectProtocol] = []
+    private var wakeTask: Task<Void, Never>?
+    private var isMacSleeping = false
     private var previousCPUTicks: (idle: Double, total: Double)?
 
     init() {
@@ -80,9 +88,10 @@ final class AppViewModel: ObservableObject {
         loadServerScopedState()
         updateFleet()
         configureDefaultAlerts()
+        configureLifecycleObservers()
         Task { diagnostics = await history.load() }
         Task { activity = await activityStore.load() }
-        Task { await loadMonitoringHistory(); await loadBaseline() }
+        Task { await loadMonitoringHistory(); await syncAgentHistory(); await loadMonitoringHistory(); await loadBaseline() }
     }
 
     var configuration: SSHConfiguration { SSHConfiguration(host: settings.host, username: settings.username, keyPath: NSString(string: settings.keyPath).expandingTildeInPath, timeout: 8, port: settings.port) }
@@ -105,23 +114,44 @@ final class AppViewModel: ObservableObject {
     func selectServer(_ id: UUID) {
         guard let server = servers.first(where: { $0.id == id }) else { return }
         activeServerID = id; UserDefaults.standard.set(id.uuidString, forKey: "activeServerID"); settings.host = server.host; settings.port = server.port; settings.username = server.username; settings.keyPath = server.keyPath
-        system = SystemSnapshot(); wireGuard = WireGuardSnapshot(); units = []; listeners = []; healthReport = nil; security = SecuritySnapshot(); exposureEndpoints=[];monitoringSamples = []; monitoringEvents = []; peerHistory=[];adGuardHistory=[];incidents=[];alertRules=[];alertStates=[:];alertEvents=[];configurationBaseline=nil;baselineDrift=[];loadServerScopedState()
-        saveSettings(); Task { await loadMonitoringHistory();await loadBaseline();await refresh() }
+        system = SystemSnapshot(); wireGuard = WireGuardSnapshot(); units = []; listeners = []; healthReport = nil; security = SecuritySnapshot(); exposureEndpoints=[];monitoringSamples = []; monitoringEvents = []; peerHistory=[];adGuardHistory=[];incidents=[];alertRules=[];alertStates=[:];alertEvents=[];configurationBaseline=nil;baselineDrift=[];lastPeerHistorySample=nil;lastAdGuardHistorySample=nil;loadServerScopedState()
+        saveSettings(); Task { await loadMonitoringHistory();await syncAgentHistory();await loadMonitoringHistory();await loadBaseline();await refresh() }
         updateFleet()
     }
 
     func completeOnboarding() { settings.completedOnboarding = true; showOnboarding = false; saveSettings() }
 
     func configurePolling() {
-        pollTask?.cancel()
+        pollingCoordinator.stop()
         guard settings.pollingEnabled else { return }
-        pollTask = Task { [weak self] in
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(self?.settings.pollingInterval ?? 5))
-                await self?.refresh()
-            }
+        pollingCoordinator.start(interval: { [weak self] in self?.settings.pollingInterval ?? 5 }) { [weak self] in await self?.refresh() }
+    }
+
+    private func configureLifecycleObservers() {
+        let center = NSWorkspace.shared.notificationCenter
+        lifecycleObservers.append(center.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in Task { @MainActor in self?.prepareForSleep() } })
+        lifecycleObservers.append(center.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in Task { @MainActor in self?.resumeAfterWake() } })
+    }
+
+    private func prepareForSleep() { isMacSleeping=true;wakeTask?.cancel(); pollingCoordinator.stop(); statusMessage = "Monitoring paused while Mac sleeps" }
+
+    func resumeAfterWake() {
+        isMacSleeping=false
+        wakeTask?.cancel()
+        pollingCoordinator.stop()
+        wakeTask = Task { [weak self] in
+            guard let self else { return }
+            await self.loadMonitoringHistory()
+            await self.syncAgentHistory()
+            await self.loadMonitoringHistory()
+            await self.loadBaseline()
+            guard !Task.isCancelled else { return }
+            await self.refresh()
+            self.configurePolling()
         }
     }
+
+    var observationFreshness: ObservationFreshness { ObservationFreshness(lastObservedAt: monitoringSamples.last?.timestamp, now: Date(), staleAfter: max(settings.pollingInterval * 3, 120)) }
 
     func refresh() async {
         guard !isRefreshing else { return }
@@ -146,6 +176,7 @@ final class AppViewModel: ObservableObject {
         async let profileList = execute(.profiles, subsystem: "Profiles")
         async let monitoringPing = execute(.monitoringPing, subsystem: "Monitoring")
         let values = await (hostname, os, uname, uptime, memory, disk, ipv4, ipv6, wg, wgAddress, wgLink, serviceUnits, socketListeners, azSettings, profileList, cpu, macPublicIP, monitoringPing)
+        guard !isMacSleeping else { return }
         system.hostname = values.0.stdout.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty ?? "—"
         system.osVersion = parseOS(values.1.stdout)
         system.kernel = values.2.stdout.split(separator: " ").dropFirst(2).first.map(String.init) ?? "—"
@@ -176,15 +207,16 @@ final class AppViewModel: ObservableObject {
     }
 
     func refreshHelper() async {
-        switch await helper.version(configuration: configuration) {
-        case .success(let version):
-            helperVersion = version; helperError = nil
+        if let capabilities = await helper.capabilities(configuration: configuration) {
+            helperCapabilities = capabilities; helperVersion = capabilities.version; helperError = nil
             backups = (try? await helper.listBackups(configuration: configuration)) ?? []
             managedPeers = (try? await helper.peers(configuration: configuration)) ?? []
-        case .failure(let error):
-            helperVersion = nil; helperError = error
+        } else {
+            helperCapabilities = nil; helperVersion = nil; helperError = AppError(title: "Helper check failed", message: "TunnelDeck could not negotiate helper capabilities.", technicalDetails: "No compatible helper-info or legacy version response.", recommendedAction: "Verify SSH access and the installed helper.")
         }
     }
+
+    var helperCanUseLegacyWrites: Bool { helperCapabilities?.supports("legacy-safe-writes") == true }
 
     func suggestedPeerIP() -> String {
         guard let address = wireGuard.address.split(separator: "/").first else { return "" }
@@ -196,7 +228,7 @@ final class AppViewModel: ObservableObject {
     }
 
     func addPeer(name: String, ip: String, dns: String, mtu: Int, allowedIPs: String, endpoint: String) async -> Bool {
-        guard settings.writeModeEnabled, helperVersion == HelperService.localVersion else {
+        guard settings.writeModeEnabled, helperCanUseLegacyWrites else {
             presentedError = AppError(title: "Write operation unavailable", message: "Write Mode and a matching server helper are required.", technicalDetails: "helper=\(helperVersion ?? "missing")", recommendedAction: "Enable Write Mode after installing helper version \(HelperService.localVersion).")
             return false
         }
@@ -214,7 +246,7 @@ final class AppViewModel: ObservableObject {
     }
 
     func removePeer(publicKey: String, deleteClient: Bool, allowExisting: Bool) async -> Bool {
-        guard settings.writeModeEnabled, helperVersion == HelperService.localVersion else { return false }
+        guard settings.writeModeEnabled, helperCanUseLegacyWrites else { return false }
         do {
             _ = try await helper.removePeer(publicKey: publicKey, deleteClient: deleteClient, allowExisting: allowExisting, configuration: configuration)
             await refresh(); return true
@@ -225,7 +257,7 @@ final class AppViewModel: ObservableObject {
     }
 
     func performServiceAction(_ action: String, unit: String) async -> Bool {
-        guard settings.writeModeEnabled, helperVersion == HelperService.localVersion else { return false }
+        guard settings.writeModeEnabled, helperCanUseLegacyWrites else { return false }
         do {
             let change = try await helper.service(action: action, unit: unit, configuration: configuration)
             logs.insert(LogEntry(timestamp: Date(), subsystem: "System", command: "helper service \(action) \(unit)", stdout: "state=\(change.state) backup=\(change.backup)", stderr: "", exitCode: 0), at: 0)
@@ -460,7 +492,7 @@ final class AppViewModel: ObservableObject {
     }
 
     func createBackup(operation: String = "scheduled") async -> Bool {
-        guard settings.writeModeEnabled, helperVersion == HelperService.localVersion else { return false }
+        guard settings.writeModeEnabled, helperCanUseLegacyWrites else { return false }
         do {
             let path = try await helper.createBackup(operation: operation, configuration: configuration)
             UserDefaults.standard.set(Date(), forKey: "lastScheduledBackup-\(settings.host)")
@@ -498,7 +530,7 @@ final class AppViewModel: ObservableObject {
     }
 
     func applyRestore() async -> Bool {
-        guard settings.writeModeEnabled, helperVersion == HelperService.localVersion, let preview = restorePreview else { return false }
+        guard settings.writeModeEnabled, helperCanUseLegacyWrites, let preview = restorePreview else { return false }
         do {
             let result = try await helper.restoreApply(identifier: preview.backup, type: preview.type, configuration: configuration)
             await activityStore.append(operation: "Restore", server: settings.host, preview: "\(preview.type): \(preview.files.count) verified files", result: "success", rollback: "available: \(result.rollbackBackup)")
@@ -520,17 +552,18 @@ final class AppViewModel: ObservableObject {
     }
 
     private func performScheduledBackupIfNeeded() async {
-        guard settings.writeModeEnabled, helperVersion == HelperService.localVersion else { return }
+        guard settings.writeModeEnabled, helperCanUseLegacyWrites else { return }
         let last = UserDefaults.standard.object(forKey: "lastScheduledBackup-\(settings.host)") as? Date ?? .distantPast
         if Date().timeIntervalSince(last) >= 86_400 { _ = await createBackup() }
     }
 
     func loadMonitoringHistory() async {
-        if let nodeID=activeServerID,let profile=servers.first(where:{$0.id==nodeID}),let persistenceStore { let node=LegacyModelAdapter.node(from:profile);try? await persistenceStore.upsert(node:node);_=try? await LegacyMonitoringImporter().importHistory(for:node,into:persistenceStore);try? await LegacyTelemetryImporter().importHistory(for:node,into:persistenceStore);monitoringSamples=(try? await persistenceStore.samples(nodeID:nodeID)) ?? [];let stored=(try? await persistenceStore.events(nodeID:nodeID)) ?? [];monitoringEvents=stored.filter{$0.kind=="monitoring"}.map{MonitoringEvent(id:$0.id,timestamp:$0.timestamp,component:$0.componentID,title:$0.title,detail:$0.detail,state:$0.state,recovered:$0.isRecovery)};alertEvents=stored.filter{$0.kind=="alert"};peerHistory=(try? await persistenceStore.peerHistory(nodeID:nodeID)) ?? [];adGuardHistory=(try? await persistenceStore.adGuardHistory(nodeID:nodeID)) ?? [];let saved=(try? await persistenceStore.alertRules(nodeID:nodeID)) ?? [];let legacy=(try? await LegacyAlertImporter().rules(for:node)) ?? [];let defaults=AlertEngine.defaultRules(nodeID:nodeID,peerTimeout:settings.handshakeTimeout);let imported=saved.isEmpty ? legacy:saved;let byKind=Dictionary(uniqueKeysWithValues:imported.map{($0.kind,$0)});alertRules=defaults.map{byKind[$0.kind] ?? $0};alertStates=(try? await persistenceStore.alertStates(nodeID:nodeID)) ?? [:];try? await persistenceStore.save(alertRules:alertRules,nodeID:nodeID) } else { monitoringSamples=await monitoringStore.loadSamples(host:settings.host);monitoringEvents=await monitoringStore.loadEvents(host:settings.host) }
-        rebuildIncidents()
+        if let nodeID=activeServerID,let profile=servers.first(where:{$0.id==nodeID}),let persistenceStore { let node=LegacyModelAdapter.node(from:profile);try? await persistenceStore.upsert(node:node);_=try? await LegacyMonitoringImporter().importHistory(for:node,into:persistenceStore);try? await LegacyTelemetryImporter().importHistory(for:node,into:persistenceStore);monitoringSamples=(try? await persistenceStore.samples(nodeID:nodeID)) ?? [];for server in servers{if let sample=try? await persistenceStore.samples(nodeID:server.id).last{lastKnownSamples[server.id]=sample}};let stored=(try? await persistenceStore.events(nodeID:nodeID)) ?? [];monitoringEvents=stored.filter{$0.kind=="monitoring"}.map{MonitoringEvent(id:$0.id,timestamp:$0.timestamp,component:$0.componentID,title:$0.title,detail:$0.detail,state:$0.state,recovered:$0.isRecovery)};alertEvents=stored.filter{$0.kind=="alert"};peerHistory=(try? await persistenceStore.peerHistory(nodeID:nodeID)) ?? [];adGuardHistory=(try? await persistenceStore.adGuardHistory(nodeID:nodeID)) ?? [];let saved=(try? await persistenceStore.alertRules(nodeID:nodeID)) ?? [];let legacy=(try? await LegacyAlertImporter().rules(for:node)) ?? [];let defaults=AlertEngine.defaultRules(nodeID:nodeID,peerTimeout:settings.handshakeTimeout);let imported=saved.isEmpty ? legacy:saved;let byKind=Dictionary(uniqueKeysWithValues:imported.map{($0.kind,$0)});alertRules=defaults.map{byKind[$0.kind] ?? $0};alertStates=(try? await persistenceStore.alertStates(nodeID:nodeID)) ?? [:];try? await persistenceStore.save(alertRules:alertRules,nodeID:nodeID) } else { monitoringSamples=await monitoringStore.loadSamples(host:settings.host);monitoringEvents=await monitoringStore.loadEvents(host:settings.host) }
+        rebuildIncidents(evaluateRules: false)
     }
 
     private func recordMonitoringState() async {
+        guard !isMacSleeping else{return}
         let adGuardState = monitoredUnitState { $0.name.contains("AdGuardHome") }
         let antiZapretState = monitoredUnitState { $0.name == "antizapret.service" }
         let exposedDNS = listeners.contains { ($0.isPublic || $0.address == settings.host) && $0.port == 53 }
@@ -576,10 +609,18 @@ final class AppViewModel: ObservableObject {
         return unit.activeState == "active" ? .online : .offline
     }
 
-    private func rebuildIncidents() { guard let nodeID = activeServerID else { incidents = []; return }; incidents = IncidentEngine.incidents(events: monitoringEvents, nodeID: nodeID); evaluateAlerts(); updateFleet() }
+    private func rebuildIncidents(evaluateRules:Bool=true) { guard let nodeID = activeServerID else { incidents = []; return }; incidents = IncidentEngine.incidents(events: monitoringEvents, nodeID: nodeID); if evaluateRules{evaluateAlerts()}; updateFleet() }
+
+    private func syncAgentHistory() async {
+        guard let nodeID=activeServerID,let persistenceStore else{return}
+        let key="agentCursors-\(nodeID.uuidString)";let cursors=UserDefaults.standard.data(forKey:key).flatMap{try? JSONDecoder().decode(AgentSyncCursors.self,from:$0)} ?? AgentSyncCursors()
+        guard let result=try? await agentSyncController.synchronize(nodeID:nodeID,cursors:cursors,service:agent,configuration:configuration,store:persistenceStore) else{return}
+        if let data=try? JSONEncoder().encode(result.cursors){UserDefaults.standard.set(data,forKey:key)}
+        if result.imported>0{statusMessage="Imported \(result.imported) server observations"}
+    }
 
     var activeNodeName: String { servers.first(where: { $0.id == activeServerID })?.name ?? (system.hostname == "—" ? "VPS" : system.hostname) }
-    func updateFleet() { fleetSummaries = fleetController.summaries(profiles: servers, activeID: activeServerID, system: system, wireGuard: wireGuard, units: units, security: security, incidents: incidents) }
+    func updateFleet() { if let id=activeServerID,let sample=monitoringSamples.last{lastKnownSamples[id]=sample};fleetSummaries = fleetController.summaries(profiles: servers, activeID: activeServerID, system: system, wireGuard: wireGuard, units: units, security: security, incidents: incidents, lastKnownSamples:lastKnownSamples) }
     func exposureName(_ endpoint: NetworkEndpoint) -> String { ExposureAnalyzer.displayName(endpoint, listeners: listeners) }
     private func currentBaseline(_ nodeID: UUID) -> ConfigurationBaseline { BaselineEngine.capture(nodeID: nodeID, endpoints: exposureEndpoints, units: units, wireGuard: wireGuard, ssh: security.ssh, hashes: currentConfigurationHashes) }
     func setCurrentBaseline() async { guard let nodeID = activeServerID else { return }; let baseline = currentBaseline(nodeID); if let profile = servers.first(where: { $0.id == nodeID }), let persistenceStore { try? await persistenceStore.upsert(node: LegacyModelAdapter.node(from: profile)); try? await persistenceStore.save(baseline: baseline) }; configurationBaseline = baseline; baselineDrift = []; evaluateAlerts() }

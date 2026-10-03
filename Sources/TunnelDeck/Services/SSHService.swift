@@ -31,6 +31,11 @@ actor SSHService {
         return try await run(command: remoteCommand, configuration: configuration, redact: true)
     }
 
+    func executeAgent(_ command: AgentReadCommand, configuration: SSHConfiguration) async throws -> CommandResult {
+        try CommandPolicy.validate(host: configuration.host, username: configuration.username, keyPath: configuration.keyPath)
+        return try await run(command: command.arguments.map(Self.shellQuote).joined(separator: " "), configuration: configuration, redact: true)
+    }
+
     func fetchClientConfig(name: String, configuration: SSHConfiguration) async throws -> String {
         let arguments = try WriteCommandPolicy.arguments(for: .clientConfig(name: name))
         let result = try await run(command: arguments.map(Self.shellQuote).joined(separator: " "), configuration: configuration, redact: false)

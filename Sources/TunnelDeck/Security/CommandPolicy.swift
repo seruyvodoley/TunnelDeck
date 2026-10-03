@@ -78,7 +78,7 @@ enum ReadOnlyCommandPolicy {
 typealias CommandPolicy = ReadOnlyCommandPolicy
 
 enum WriteHelperCommand: Sendable, Equatable {
-    case version, health, listBackups, wireGuardList
+    case version, info, health, listBackups, wireGuardList
     case addPeer(name: String, ip: String, dns: String, mtu: Int, allowedIPs: String, endpoint: String)
     case removePeer(publicKey: String, deleteClient: Bool, allowExisting: Bool)
     case clientConfig(name: String)
@@ -98,6 +98,7 @@ enum WriteCommandPolicy {
     static func arguments(for command: WriteHelperCommand) throws -> [String] {
         switch command {
         case .version: return [helperPath, "version"]
+        case .info: return [helperPath, "helper-info"]
         case .health: return [helperPath, "health"]
         case .listBackups: return [helperPath, "list-backups"]
         case .wireGuardList: return [helperPath, "wg-list"]
