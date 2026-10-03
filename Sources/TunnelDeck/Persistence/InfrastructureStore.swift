@@ -54,10 +54,12 @@ actor InfrastructureStore {
             INSERT OR IGNORE INTO monitoring_samples(id,node_id,timestamp,cpu,memory,disk,ping,vps_state,wg_state,adguard_state,antizapret_state,public_dns,public_listeners)
             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
             """, [.text(sample.id.uuidString), .text(nodeID.uuidString), .date(sample.timestamp), .real(sample.cpuPercent), .real(sample.memoryPercent), .real(sample.diskPercent), sample.pingMilliseconds.map(Binding.real) ?? .null, .text(sample.vpsState.rawValue), .text(sample.wireGuardState.rawValue), .text(sample.adGuardState.rawValue), .text(sample.antiZapretState.rawValue), .integer(sample.publicDNSExposed ? 1 : 0), .text(listeners)])
+        try prune("monitoring_samples", nodeID, sample.timestamp)
     }
 
     func insert(event: InfrastructureEvent) throws {
         try run("INSERT OR IGNORE INTO infrastructure_events(id,node_id,timestamp,component_id,kind,title,detail,state,is_recovery) VALUES(?,?,?,?,?,?,?,?,?)", [.text(event.id.uuidString), .text(event.nodeID.uuidString), .date(event.timestamp), .text(event.componentID), .text(event.kind), .text(event.title), .text(event.detail), .text(event.state.rawValue), .integer(event.isRecovery ? 1 : 0)])
+        try prune("infrastructure_events", event.nodeID, event.timestamp)
     }
 
     func sampleCount(nodeID: UUID) throws -> Int { Int(try scalar("SELECT count(*) FROM monitoring_samples WHERE node_id=?", [.text(nodeID.uuidString)])) }

@@ -1,5 +1,13 @@
 # Recovery
 
+## Mac sleep and monitoring gaps
+
+Closing a MacBook pauses local observation; it is not evidence that a VPS went offline. Existing SQLite rows remain available for seven days. On wake TunnelDeck reloads them before making a new check. A gap is rendered as a gap and labelled stale rather than filled with synthetic samples.
+
+When Agent 2.0 is deployed, wake reconciliation imports server samples after the saved cursor before live refresh. If the agent is absent or unreachable, local history is preserved and direct monitoring resumes without treating agent failure as node failure.
+
+The installer defaults to preview. Production install, upgrade, uninstall, helper replacement, and systemd activation require a separately authorized deployment step.
+
 ## TunnelDeck 2.0 local data
 
 The SQLite database is local metadata, not a server configuration backup. If unavailable, TunnelDeck recreates the schema and can idempotently re-import retained 1.x Monitoring JSON.

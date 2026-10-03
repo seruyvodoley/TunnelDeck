@@ -19,8 +19,7 @@ struct MonitoringView: View {
     @EnvironmentObject var model: AppViewModel
 
     private var filteredSamples: [MonitoringSample] {
-        let cutoff = Date().addingTimeInterval(-Double(model.monitoringWindowHours) * 3600)
-        return model.monitoringSamples.filter { $0.timestamp >= cutoff }
+        MonitoringHistory.filtered(model.monitoringSamples, hours: model.monitoringWindowHours, timestamp: \MonitoringSample.timestamp)
     }
 
     private var historyCutoff: Date {
@@ -76,14 +75,13 @@ struct MonitoringView: View {
                             Text("1 hour").tag(1)
                             Text("6 hours").tag(6)
                             Text("24 hours").tag(24)
+                            Text("7 days").tag(168)
                         }
                         .pickerStyle(.segmented)
                         .frame(maxWidth: 420)
 
                         if filteredSamples.isEmpty {
-                            Text("No samples in this window yet. Keep polling enabled to build history.")
-                                .foregroundStyle(.secondary)
-                                .frame(maxWidth: .infinity, minHeight: 160, alignment: .center)
+                            emptyHistory(last: model.monitoringSamples.last?.timestamp, noun: "samples")
                         } else {
                             HStack(spacing: 24) {
                                 averageMetric("CPU avg", filteredSamples.map(\.cpuPercent))
@@ -92,13 +90,17 @@ struct MonitoringView: View {
                                 averageMetric("Ping avg", filteredSamples.compactMap(\.pingMilliseconds), suffix: " ms")
                             }
 
-                            Chart(filteredSamples) { sample in
-                                LineMark(x: .value("Time", sample.timestamp), y: .value("Percent", sample.cpuPercent))
-                                    .foregroundStyle(by: .value("Metric", "CPU"))
-                                LineMark(x: .value("Time", sample.timestamp), y: .value("Percent", sample.memoryPercent))
-                                    .foregroundStyle(by: .value("Metric", "RAM"))
-                                LineMark(x: .value("Time", sample.timestamp), y: .value("Percent", sample.diskPercent))
-                                    .foregroundStyle(by: .value("Metric", "Disk"))
+                            Chart {
+                                ForEach(Array(MonitoringHistory.segments(filteredSamples, expectedInterval: model.settings.pollingInterval, timestamp: \MonitoringSample.timestamp).enumerated()), id: \.offset) { segment, points in
+                                    ForEach(points) { sample in
+                                        LineMark(x: .value("Time", sample.timestamp), y: .value("Percent", sample.cpuPercent), series: .value("Series", "CPU-\(segment)"))
+                                            .foregroundStyle(by: .value("Metric", "CPU"))
+                                        LineMark(x: .value("Time", sample.timestamp), y: .value("Percent", sample.memoryPercent), series: .value("Series", "RAM-\(segment)"))
+                                            .foregroundStyle(by: .value("Metric", "RAM"))
+                                        LineMark(x: .value("Time", sample.timestamp), y: .value("Percent", sample.diskPercent), series: .value("Series", "Disk-\(segment)"))
+                                            .foregroundStyle(by: .value("Metric", "Disk"))
+                                    }
+                                }
                             }
                             .chartYScale(domain: 0...100)
                             .chartLegend(position: .bottom)
@@ -122,7 +124,7 @@ struct MonitoringView: View {
                 MetricCard(title: "WireGuard peer history", icon: "point.3.connected.trianglepath.dotted") {
                     VStack(alignment: .leading, spacing: 10) {
                         if peerIDsInWindow.isEmpty {
-                            Text("No peer history in this window yet.").foregroundStyle(.secondary)
+                            emptyHistory(last: model.peerHistory.last?.timestamp, noun: "peer samples")
                         } else {
                             ForEach(peerIDsInWindow, id: \.self) { peerID in
                                 let points = peerPoints(peerID)
@@ -151,8 +153,7 @@ struct MonitoringView: View {
                 MetricCard(title: "AdGuard history", icon: "shield.checkered") {
                     VStack(alignment: .leading, spacing: 12) {
                         if filteredAdGuardHistory.isEmpty {
-                            Text("No AdGuard API history in this window yet. When credentials are configured, TunnelDeck samples it at most once per minute.")
-                                .foregroundStyle(.secondary)
+                            emptyHistory(last: model.adGuardHistory.last?.timestamp, noun: "AdGuard samples")
                         } else {
                             HStack(spacing: 24) {
                                 incidentMetric("Queries", String(AdGuardHistoryAnalytics.queryDelta(filteredAdGuardHistory)))
@@ -215,12 +216,27 @@ struct MonitoringView: View {
     }
 
     private var latestSample: MonitoringSample? { model.monitoringSamples.last }
+    @ViewBuilder private func emptyHistory(last: Date?, noun: String) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if let last {
+                Text("No \(noun) in the last \(windowLabel).")
+                Text("Mac monitoring was inactive or sleeping. Last sample: \(last.formatted(date: .abbreviated, time: .standard)) (\(last.formatted(.relative(presentation: .numeric)))).")
+                    .foregroundStyle(.secondary)
+                if Date().timeIntervalSince(last) <= MonitoringHistory.retention && model.monitoringWindowHours < 168 {
+                    Button("Show last available data") { model.monitoringWindowHours = 168 }
+                }
+            } else {
+                Text("No \(noun) have been recorded yet.").foregroundStyle(.secondary)
+            }
+        }.frame(maxWidth: .infinity, minHeight: 100, alignment: .center)
+    }
+    private var windowLabel: String { model.monitoringWindowHours == 1 ? "hour" : model.monitoringWindowHours == 168 ? "7 days" : "\(model.monitoringWindowHours) hours" }
     private func serviceCard(_ title: String, component: String, state: HealthState) -> some View {
         MetricCard(title: title, icon: "circle.grid.2x2") {
             VStack(alignment: .leading, spacing: 7) {
                 HStack {
                     StatusDot(state: state)
-                    Text(state.rawValue.capitalized).font(.title3.bold())
+                    Text(model.observationFreshness.isStale ? "Stale" : state.rawValue.capitalized).font(.title3.bold())
                 }
                 KeyValueRow(key: "Current streak", value: currentStreak(component))
                 KeyValueRow(key: "Changes · 24h", value: String(changes24h(component)))

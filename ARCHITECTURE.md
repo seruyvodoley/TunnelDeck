@@ -1,5 +1,18 @@
 # TunnelDeck Architecture
 
+## Wake and server telemetry flow
+
+Local SQLite is the macOS operational source of truth. Sleep stops the single polling coordinator without recording an outage. Wake reloads local history, attempts an incremental Agent 2.0 cursor sync, reloads merged history, refreshes the selected node, and restarts exactly one polling loop.
+
+The server boundary is split: `tunneldeck-agent` collects read-only facts as an unprivileged systemd timer, while `tunneldeck-helper` performs only explicit transactional writes. `AgentSyncController` owns catch-up import rather than expanding `AppViewModel` again.
+
+## Persistence ownership
+
+- Persist: nodes, monitoring samples/events, peer and AdGuard telemetry, alert rules/runtime state, configuration baselines, and Agent sync cursors. Credentials and private keys never enter SQLite.
+- Rebuild: incidents from persisted events; baseline drift from the saved baseline plus a fresh observation; Fleet summaries from per-node last-known samples; charts from persisted telemetry.
+- Refresh after wake: system, WireGuard, service, helper, AdGuard, security, exposure, and current Fleet state. Until refreshed, prior observations are stale—not offline.
+- Session-only: in-flight progress, presented errors, raw command results, and helper reachability. Security/exposure facts are deliberately reacquired because old evidence cannot prove current reachability.
+
 ## 2.0 direction
 
 `AppViewModel` remains the compatibility facade for 1.x screens. New behavior is extracted incrementally into fleet, incident, security/exposure, baseline and alert controllers/engines. This avoids a high-risk rewrite and keeps each commit release-buildable.

@@ -1,0 +1,23 @@
+[Unit]
+Description=TunnelDeck read-only monitoring agent
+After=network.target
+
+[Service]
+Type=oneshot
+User=tunneldeck-agent
+Group=tunneldeck-agent
+ExecStart=/usr/local/libexec/tunneldeck-agent collect
+# Exact sudoers read commands require privilege transition; all other writes remain denied.
+NoNewPrivileges=false
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+ReadWritePaths=/var/lib/tunneldeck
+CapabilityBoundingSet=
+LockPersonality=true
+MemoryDenyWriteExecute=true
+
+[Install]
+WantedBy=multi-user.target
