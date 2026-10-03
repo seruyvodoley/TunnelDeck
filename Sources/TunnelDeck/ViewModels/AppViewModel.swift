@@ -130,6 +130,8 @@ final class AppViewModel: ObservableObject {
         updateFleet()
     }
 
+    func saveNewServer(name:String,role:String){activeServerID=nil;saveCurrentServer(name:name,role:role);if let id=activeServerID{selectServer(id)}}
+
     func selectServer(_ id: UUID) {
         guard let server = servers.first(where: { $0.id == id }) else { return }
         nodeOperations.advance();refreshCadence.reset();cpuDeltaTracker.reset();securityOperation.cancel();nodeLoadTask?.cancel();wakeTask?.cancel();agentSyncTask?.cancel();alertSaveTask?.cancel();healthCheckTask?.cancel();healthCheckTask=nil;agentSyncTask=nil;agentSyncToken=nil;refreshToken=nil;healthCheckToken=nil;isRefreshing=false;isRunningHealthCheck=false

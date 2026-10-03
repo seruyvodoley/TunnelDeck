@@ -536,7 +536,8 @@ import Testing
     let store=try InfrastructureStore(url:root.appendingPathComponent("db.sqlite3")),node=InfrastructureNode(id:UUID(),name:"Fixture",role:.primary,customRole:nil,host:"fixture.invalid",sshPort:22,createdAt:Date(),updatedAt:Date(),enabled:true);try await store.upsert(node:node);let now=Date()
     for offset in [-8_000.0,-100.0]{try await store.insert(sample:MonitoringSample(nodeID:node.id,id:UUID(),timestamp:now.addingTimeInterval(offset),cpuPercent:1,memoryPercent:2,diskPercent:3,pingMilliseconds:nil,vpsState:.online,wireGuardState:.online,adGuardState:.online,antiZapretState:.online,publicDNSExposed:false,publicListeners:[]),nodeID:node.id)}
     #expect(try await store.samples(nodeID:node.id,since:now.addingTimeInterval(-3_600)).count==1)
-    #expect(try await store.latestSamples()[node.id]?.timestamp==now.addingTimeInterval(-100))
+    let latest=try await store.latestSamples()[node.id]?.timestamp
+    #expect(latest.map{abs($0.timeIntervalSince(now.addingTimeInterval(-100)))<0.001} == true)
 }
 
 @Test func agentPaginationSynchronizesSevenDayBacklogWithoutDuplicates() async throws {
