@@ -83,10 +83,13 @@ final class AppViewModel: ObservableObject {
     private var agentSyncTask: Task<AgentSyncResult?, Never>?
     private var agentSyncToken: UUID?
     private var refreshToken: UUID?
+    private let securityOperation = InFlightOperationState()
+    private var healthCheckTask: Task<Void,Never>?
+    private var healthCheckToken: UUID?
     private var alertSaveTask: Task<Void, Never>?
     private var lastAgentSyncAttempt: Date?
     private var isMacSleeping = false
-    private var previousCPUTicks: (idle: Double, total: Double)?
+    private let cpuDeltaTracker = CPUDeltaTracker()
 
     init() {
         let decoded = UserDefaults.standard.data(forKey: "settings").flatMap { try? JSONDecoder().decode(AppSettings.self, from: $0) }
@@ -126,7 +129,7 @@ final class AppViewModel: ObservableObject {
 
     func selectServer(_ id: UUID) {
         guard let server = servers.first(where: { $0.id == id }) else { return }
-        nodeOperations.advance();refreshCadence.reset();nodeLoadTask?.cancel();wakeTask?.cancel();agentSyncTask?.cancel();alertSaveTask?.cancel();agentSyncTask=nil;agentSyncToken=nil;refreshToken=nil;isRefreshing=false
+        nodeOperations.advance();refreshCadence.reset();cpuDeltaTracker.reset();securityOperation.cancel();nodeLoadTask?.cancel();wakeTask?.cancel();agentSyncTask?.cancel();alertSaveTask?.cancel();healthCheckTask?.cancel();agentSyncTask=nil;agentSyncToken=nil;refreshToken=nil;healthCheckToken=nil;isRefreshing=false;isRunningHealthCheck=false
         activeServerID = id; UserDefaults.standard.set(id.uuidString, forKey: "activeServerID"); settings.host = server.host; settings.port = server.port; settings.username = server.username; settings.keyPath = server.keyPath;isRefreshingSecurity=false
         system = SystemSnapshot(); wireGuard = WireGuardSnapshot(); units = []; listeners = []; healthReport = nil; security = SecuritySnapshot(); exposureEndpoints=[];monitoringSamples = []; monitoringEvents = []; peerHistory=[];adGuardHistory=[];incidents=[];alertRules=[];alertStates=[:];alertEvents=[];configurationBaseline=nil;baselineDrift=[];lastPeerHistorySample=nil;lastAdGuardHistorySample=nil;loadServerScopedState()
         saveSettings();nodeLoadTask=Task{[weak self] in guard let self else{return};await self.loadMonitoringHistory();guard !Task.isCancelled else{return};await self.syncAgentHistory();guard !Task.isCancelled else{return};await self.loadMonitoringHistory();await self.loadBaseline();guard !Task.isCancelled else{return};await self.refresh()}
@@ -147,10 +150,11 @@ final class AppViewModel: ObservableObject {
         lifecycleObservers.append(center.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in Task { @MainActor in self?.resumeAfterWake() } })
     }
 
-    private func prepareForSleep() { isMacSleeping=true;nodeOperations.advance();wakeTask?.cancel();nodeLoadTask?.cancel();agentSyncTask?.cancel();agentSyncTask=nil;agentSyncToken=nil;refreshToken=nil;isRefreshing=false;pollingCoordinator.stop(); statusMessage = "Monitoring paused while Mac sleeps" }
+    private func prepareForSleep() { isMacSleeping=true;nodeOperations.advance();cpuDeltaTracker.reset();securityOperation.cancel();wakeTask?.cancel();nodeLoadTask?.cancel();agentSyncTask?.cancel();healthCheckTask?.cancel();agentSyncTask=nil;agentSyncToken=nil;refreshToken=nil;healthCheckToken=nil;isRefreshing=false;isRefreshingSecurity=false;isRunningHealthCheck=false;pollingCoordinator.stop(); statusMessage = "Monitoring paused while Mac sleeps" }
 
     func resumeAfterWake() {
         isMacSleeping=false
+        cpuDeltaTracker.reset()
         wakeTask?.cancel()
         pollingCoordinator.stop()
         wakeTask = Task { [weak self] in
@@ -289,17 +293,26 @@ final class AppViewModel: ObservableObject {
     }
 
     func runFullHealthCheck() async {
-        guard !isRunningHealthCheck else { return }
-        isRunningHealthCheck = true
-        defer { isRunningHealthCheck = false }
+        if let healthCheckTask{await healthCheckTask.value;return}
+        let context=nodeOperations.capture(nodeID:activeServerID),configuration=self.configuration,host=settings.host,handshakeTimeout=settings.handshakeTimeout,approved=approvedListenerIDs,ignored=ignoredPeerIDs,token=UUID()
+        isRunningHealthCheck=true;healthCheckToken=token
+        let task=Task{[weak self] in guard let self else{return};await self.performFullHealthCheck(context:context,configuration:configuration,host:host,handshakeTimeout:handshakeTimeout,approved:approved,ignored:ignored)}
+        healthCheckTask=task;await task.value
+        if healthCheckToken==token{healthCheckTask=nil;healthCheckToken=nil;isRunningHealthCheck=false}
+    }
+
+    private func performFullHealthCheck(context:(UUID?,Int),configuration:SSHConfiguration,host:String,handshakeTimeout:TimeInterval,approved:Set<String>,ignored:Set<String>) async {
 
         let commands: [ReadCommand] = [.hostname, .wireGuardService, .wireGuard, .wireGuardAll, .wireGuardAddress, .udpListeners, .ipForward, .natRules, .pingInternet, .dnsTest, .adGuardStatus, .adGuardBinds, .antiZapretStatus, .units, .disk, .memory, .uptime, .listeners, .firewallState, .configurationHashes]
         var results: [ReadCommand: CommandResult] = [:]
         for command in commands {
-            results[command] = await execute(command, subsystem: "Doctor")
+            guard !Task.isCancelled else{return}
+            results[command] = await execute(command, subsystem: "Doctor",configuration:configuration)
         }
 
-        var freshWireGuard = WireGuardParser.parse(results[.wireGuard]?.stdout ?? "", timeout: settings.handshakeTimeout)
+        guard !Task.isCancelled,nodeOperations.accepts(nodeID:context.0,generation:context.1,activeNodeID:activeServerID) else{return}
+
+        var freshWireGuard = WireGuardParser.parse(results[.wireGuard]?.stdout ?? "", timeout: handshakeTimeout)
         freshWireGuard.address = parseWireGuardAddress(results[.wireGuardAddress]?.stdout ?? "")
 
         var freshSystem = system
@@ -316,14 +329,16 @@ final class AppViewModel: ObservableObject {
             listeners: freshListeners,
             system: freshSystem,
             wireGuard: freshWireGuard,
-            host: settings.host,
-            approvedListenerIDs: approvedListenerIDs,
-            ignoredPeerIDs: ignoredPeerIDs
+            host: host,
+            approvedListenerIDs: approved,
+            ignoredPeerIDs: ignored
         )
         detectConfigurationDrift(results[.configurationHashes]?.stdout ?? "", storeBaseline: healthReport?.state == .online)
         if healthReport?.state == .online { lastSuccessfulHealthCheck = Date() }
-        await activityStore.append(operation: "Full Health Check", server: settings.host, preview: "\(commands.count) read-only checks", result: healthReport?.state.rawValue ?? "unknown")
-        activity = await activityStore.load()
+        let resultState=healthReport?.state.rawValue ?? "unknown"
+        await activityStore.append(operation: "Full Health Check", server: host, preview: "\(commands.count) read-only checks", result: resultState)
+        let loadedActivity=await activityStore.load()
+        guard !Task.isCancelled,nodeOperations.accepts(nodeID:context.0,generation:context.1,activeNodeID:activeServerID) else{return};activity=loadedActivity
     }
 
     func approveListener(for issue: HealthIssue) {
@@ -410,9 +425,9 @@ final class AppViewModel: ObservableObject {
 
     func refreshSecurityAudit() async {
         guard !isRefreshingSecurity else { return }
-        let context=nodeOperations.capture(nodeID:activeServerID),capturedConfiguration=configuration,capturedHost=settings.host,capturedPort=settings.port
+        let context=nodeOperations.capture(nodeID:activeServerID),capturedConfiguration=configuration,capturedHost=settings.host,capturedPort=settings.port,token=securityOperation.begin()
         isRefreshingSecurity = true
-        defer { if nodeOperations.accepts(nodeID:context.0,generation:context.1,activeNodeID:activeServerID){isRefreshingSecurity = false} }
+        defer { if securityOperation.finish(token){isRefreshingSecurity=false} }
 
         async let freshListeners = execute(.listeners, subsystem: "Security",configuration:capturedConfiguration)
         async let allWireGuard = execute(.wireGuardAll, subsystem: "Security",configuration:capturedConfiguration)
@@ -711,11 +726,7 @@ final class AppViewModel: ObservableObject {
         guard values.count >= 4 else { return system.cpuPercent }
         let idle = values[3] + (values.count > 4 ? values[4] : 0)
         let total = values.reduce(0, +)
-        defer { previousCPUTicks = (idle, total) }
-        guard let previousCPUTicks else { return 0 }
-        let totalDelta = total - previousCPUTicks.total
-        guard totalDelta > 0 else { return system.cpuPercent }
-        return max(0, min(100, (1 - (idle - previousCPUTicks.idle) / totalDelta) * 100))
+        return cpuDeltaTracker.percentage(idle:idle,total:total,fallback:system.cpuPercent)
     }
 }
 

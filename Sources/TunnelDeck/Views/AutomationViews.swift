@@ -87,14 +87,12 @@ struct MonitoringView: View {
                             .chartLegend(position: .bottom)
                             .frame(height: 230)
 
-                            let pingSamples = presentation.sampleSegments.flatMap { $0 }.filter { $0.pingMilliseconds != nil }
-                            if !pingSamples.isEmpty {
+                            if !presentation.pingSegments.isEmpty {
                                 Text("VPS internet latency").font(.headline)
-                                Chart(pingSamples) { sample in
-                                    LineMark(
-                                        x: .value("Time", sample.timestamp),
-                                        y: .value("Ping", sample.pingMilliseconds ?? 0)
-                                    )
+                                Chart {
+                                    ForEach(Array(presentation.pingSegments.enumerated()),id:\.offset){segment,points in
+                                        ForEach(points){sample in LineMark(x:.value("Time",sample.timestamp),y:.value("Ping",sample.pingMilliseconds ?? 0),series:.value("Segment",segment))}
+                                    }
                                 }
                                 .frame(height: 150)
                             }
@@ -142,11 +140,10 @@ struct MonitoringView: View {
                                 incidentMetric("Blocked %", String(format: "%.1f%%", presentation.adGuard.last?.blockedPercentage ?? 0))
                                 incidentMetric("Avg processing", String(format: "%.2f ms", (presentation.adGuard.last?.averageProcessingTime ?? 0) * 1000))
                             }
-                            Chart(presentation.adGuardChart) { sample in
-                                LineMark(
-                                    x: .value("Time", sample.timestamp),
-                                    y: .value("Blocked %", sample.blockedPercentage)
-                                )
+                            Chart {
+                                ForEach(Array(presentation.adGuardSegments.enumerated()),id:\.offset){segment,points in
+                                    ForEach(points){sample in LineMark(x:.value("Time",sample.timestamp),y:.value("Blocked %",sample.blockedPercentage),series:.value("Segment",segment))}
+                                }
                             }
                             .chartYScale(domain: 0...100)
                             .frame(height: 170)

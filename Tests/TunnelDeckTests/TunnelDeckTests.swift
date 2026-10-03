@@ -481,6 +481,34 @@ import Testing
     #expect(!guardrail.accepts(nodeID:nodeA,generation:capture.1,activeNodeID:nodeB))
 }
 
+@MainActor @Test func sleepCancelsSecurityActivityWithoutStuckFlag() {
+    let generation=NodeOperationGuard(),activity=InFlightOperationState(),node=UUID(),capture=generation.capture(nodeID:node),token=activity.begin()
+    #expect(activity.isActive)
+    generation.advance();activity.cancel()
+    #expect(!activity.isActive);#expect(!activity.finish(token));#expect(!generation.accepts(nodeID:node,generation:capture.1,activeNodeID:node))
+    _=activity.begin();#expect(activity.isActive)
+}
+
+@MainActor @Test func doctorResultForPreviousNodeIsRejected() {
+    let guardrail=NodeOperationGuard(),nodeA=UUID(),nodeB=UUID(),doctorA=guardrail.capture(nodeID:nodeA)
+    guardrail.advance()
+    #expect(!guardrail.accepts(nodeID:doctorA.0,generation:doctorA.1,activeNodeID:nodeB))
+}
+
+@MainActor @Test func cpuDeltaResetsAtObservationBoundary() {
+    let tracker=CPUDeltaTracker()
+    #expect(tracker.percentage(idle:80,total:100,fallback:42)==0)
+    #expect(tracker.percentage(idle:85,total:120,fallback:42)==75)
+    tracker.reset();#expect(tracker.percentage(idle:500,total:1_000,fallback:42)==0)
+    #expect(tracker.percentage(idle:510,total:1_100,fallback:42)==90)
+}
+
+@Test func monitoringPresentationSegmentsPingAndAdGuardGaps() {
+    let now=Date(),node=UUID();func sample(_ seconds:TimeInterval)->MonitoringSample{MonitoringSample(nodeID:node,id:UUID(),timestamp:now.addingTimeInterval(seconds),cpuPercent:1,memoryPercent:2,diskPercent:3,pingMilliseconds:10,vpsState:.online,wireGuardState:.online,adGuardState:.online,antiZapretState:.online,publicDNSExposed:false,publicListeners:[])};func dns(_ seconds:TimeInterval)->AdGuardHistorySample{AdGuardHistorySample(nodeID:node,id:UUID(),timestamp:now.addingTimeInterval(seconds),totalQueries:1,blockedQueries:0,blockedPercentage:0,averageProcessingTime:0)}
+    let presentation=MonitoringPresentation.build(samples:[sample(-3600),sample(-3570),sample(0)],peers:[],adGuard:[dns(-3600),dns(-3540),dns(0)],hours:2,expectedInterval:30,now:now)
+    #expect(presentation.sampleSegments.count==2);#expect(presentation.pingSegments.count==2);#expect(presentation.adGuardSegments.count==2)
+}
+
 @MainActor @Test func refreshCadencePreventsDuplicateMediumWork() {
     let cadence=RefreshCadenceController(),start=Date()
     #expect(cadence.shouldRun("medium",every:60,now:start))
@@ -490,12 +518,17 @@ import Testing
 }
 
 @Test func chartDownsamplingPreservesEndpointsSpikesAndGaps() {
-    let node=UUID(),start=Date();let values=(0..<10_080).map{index in MonitoringSample(nodeID:node,id:UUID(),timestamp:start.addingTimeInterval(Double(index*60)),cpuPercent:index==5_000 ? 100:10,memoryPercent:index==7_000 ? 99:20,diskPercent:30,pingMilliseconds:index==8_000 ? 2_000:20,vpsState:.online,wireGuardState:.online,adGuardState:.online,antiZapretState:.online,publicDNSExposed:false,publicListeners:[]) }
+    let node=UUID(),start=Date()
+    func value(_ index:Int)->MonitoringSample {
+        let cpu:Double=index==5_000 ? 100:10,memory:Double=index==7_000 ? 99:20,ping:Double=index==8_000 ? 2_000:20
+        return MonitoringSample(nodeID:node,id:UUID(),timestamp:start.addingTimeInterval(Double(index*60)),cpuPercent:cpu,memoryPercent:memory,diskPercent:30,pingMilliseconds:ping,vpsState:.online,wireGuardState:.online,adGuardState:.online,antiZapretState:.online,publicDNSExposed:false,publicListeners:[])
+    }
+    let values:[MonitoringSample]=(0..<10_080).map(value)
     let rendered=ChartDownsampler.monitoring(values,maxPoints:1_200)
     #expect(rendered.count<=1_200);#expect(rendered.first?.id==values.first?.id);#expect(rendered.last?.id==values.last?.id)
     #expect(rendered.contains{$0.cpuPercent==100});#expect(rendered.contains{$0.memoryPercent==99});#expect(rendered.contains{$0.pingMilliseconds==2_000})
     let gapValues=[values[0],values[1],values[100]]
-    #expect(MonitoringHistory.segments(gapValues,expectedInterval:60,timestamp:\.timestamp).count==2)
+    #expect(MonitoringHistory.segments(gapValues,expectedInterval:60,timestamp:{(sample:MonitoringSample) in sample.timestamp}).count==2)
 }
 
 @Test func sqliteSinceQueriesAndLatestSamplesAvoidFullHistoryLoads() async throws {

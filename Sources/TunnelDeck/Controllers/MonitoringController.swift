@@ -44,20 +44,38 @@ enum MonitoringHistory {
 struct MonitoringPresentation: Sendable {
     let samples: [MonitoringSample]
     let sampleSegments: [[MonitoringSample]]
+    let pingSegments: [[MonitoringSample]]
     let peerGroups: [(id: String, samples: [PeerHistorySample])]
     let adGuard: [AdGuardHistorySample]
-    let adGuardChart: [AdGuardHistorySample]
+    let adGuardSegments: [[AdGuardHistorySample]]
 
     static func build(samples: [MonitoringSample], peers: [PeerHistorySample], adGuard: [AdGuardHistorySample], hours: Int, expectedInterval: TimeInterval, now: Date = Date(), chartPointLimit: Int = 1_200) -> MonitoringPresentation {
         let cutoff = MonitoringHistory.cutoff(hours: hours, now: now)
         let windowSamples = samples.filter { $0.timestamp >= cutoff }
         let segments = MonitoringHistory.segments(windowSamples, expectedInterval: expectedInterval, timestamp: \MonitoringSample.timestamp)
             .map { ChartDownsampler.monitoring($0, maxPoints: chartPointLimit) }
+        let pingSegments = segments.map { $0.filter { $0.pingMilliseconds != nil } }.filter { !$0.isEmpty }
         let grouped = Dictionary(grouping: peers.lazy.filter { $0.timestamp >= cutoff }, by: \PeerHistorySample.peerID)
             .map { (id: $0.key, samples: $0.value.sorted { $0.timestamp < $1.timestamp }) }
             .sorted { $0.id < $1.id }
         let adGuardWindow = adGuard.filter { $0.timestamp >= cutoff }.sorted { $0.timestamp < $1.timestamp }
-        return MonitoringPresentation(samples: windowSamples, sampleSegments: segments, peerGroups: grouped, adGuard: adGuardWindow, adGuardChart: ChartDownsampler.adGuard(adGuardWindow, maxPoints: chartPointLimit))
+        let adGuardSegments = MonitoringHistory.segments(adGuardWindow, expectedInterval: max(expectedInterval, 60), timestamp: \AdGuardHistorySample.timestamp)
+            .map { ChartDownsampler.adGuard($0, maxPoints: chartPointLimit) }
+        return MonitoringPresentation(samples: windowSamples, sampleSegments: segments, pingSegments: pingSegments, peerGroups: grouped, adGuard: adGuardWindow, adGuardSegments: adGuardSegments)
+    }
+}
+
+@MainActor
+final class CPUDeltaTracker {
+    private var previous: (idle: Double, total: Double)?
+
+    func reset() { previous = nil }
+    func percentage(idle: Double, total: Double, fallback: Double) -> Double {
+        defer { previous = (idle, total) }
+        guard let previous else { return 0 }
+        let totalDelta = total - previous.total
+        guard totalDelta > 0 else { return fallback }
+        return max(0, min(100, (1 - (idle - previous.idle) / totalDelta) * 100))
     }
 }
 
@@ -101,6 +119,15 @@ final class NodeOperationGuard {
     func advance() { generation += 1 }
     func capture(nodeID: UUID?) -> (UUID?, Int) { (nodeID, generation) }
     func accepts(nodeID: UUID?, generation: Int, activeNodeID: UUID?) -> Bool { self.generation == generation && nodeID == activeNodeID }
+}
+
+@MainActor
+final class InFlightOperationState {
+    private var token: UUID?
+    var isActive: Bool { token != nil }
+    func begin() -> UUID { let value=UUID();token=value;return value }
+    func cancel() { token=nil }
+    func finish(_ value:UUID)->Bool{guard token==value else{return false};token=nil;return true}
 }
 
 @MainActor
