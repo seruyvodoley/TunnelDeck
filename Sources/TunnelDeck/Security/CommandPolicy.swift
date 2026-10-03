@@ -78,7 +78,7 @@ enum ReadOnlyCommandPolicy {
 typealias CommandPolicy = ReadOnlyCommandPolicy
 
 enum WriteHelperCommand: Sendable, Equatable {
-    case version, info, health, listBackups, wireGuardList
+    case version, health, listBackups, wireGuardList
     case addPeer(name: String, ip: String, dns: String, mtu: Int, allowedIPs: String, endpoint: String)
     case removePeer(publicKey: String, deleteClient: Bool, allowExisting: Bool)
     case clientConfig(name: String)
@@ -87,6 +87,15 @@ enum WriteHelperCommand: Sendable, Equatable {
     case backupVerify(identifier: String)
     case restorePreview(identifier: String, type: String)
     case restoreApply(identifier: String, type: String)
+}
+
+enum Helper2Command: Sendable, Equatable { case info }
+
+enum Helper2CommandPolicy {
+    static let helperPath = "/usr/local/libexec/tunneldeck-helper2"
+    static func arguments(for command: Helper2Command) -> [String] {
+        switch command { case .info: [helperPath, "helper-info"] }
+    }
 }
 
 enum WriteCommandPolicy {
@@ -98,7 +107,6 @@ enum WriteCommandPolicy {
     static func arguments(for command: WriteHelperCommand) throws -> [String] {
         switch command {
         case .version: return [helperPath, "version"]
-        case .info: return [helperPath, "helper-info"]
         case .health: return [helperPath, "health"]
         case .listBackups: return [helperPath, "list-backups"]
         case .wireGuardList: return [helperPath, "wg-list"]

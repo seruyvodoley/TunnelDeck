@@ -68,8 +68,10 @@ struct SettingsView: View {
                     if enabled { state.confirmWriteMode = true } else { model.settings.writeModeEnabled = false; model.saveSettings() }
                 }))
                 Text("Write Mode only permits validated TunnelDeck helper subcommands. Automatic backups are required before configuration changes.").foregroundStyle(.secondary)
-                if let version = model.helperVersion { KeyValueRow(key: "Server helper", value: version) }
-                else { Label("Server helper unavailable", systemImage: "exclamationmark.triangle").foregroundStyle(.orange) }
+                if let version = model.helperVersion { KeyValueRow(key: "Legacy Helper", value: "\(version) · Ready") }
+                else { Label("Legacy Helper unavailable", systemImage: "exclamationmark.triangle").foregroundStyle(.orange) }
+                if let helper2 = model.helper2Capabilities { KeyValueRow(key: "Helper 2", value: "\(helper2.version) · Ready") }
+                else { KeyValueRow(key: "Helper 2", value: "Not installed") }
             }
             Section("System") {
                 Toggle("Launch at Login", isOn: Binding(get: { model.settings.launchAtLogin }, set: { value in

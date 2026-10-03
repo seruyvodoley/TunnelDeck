@@ -1,5 +1,9 @@
-# Exact read-only evidence commands required by tunneldeck-agent.
-tunneldeck-agent ALL=(root) NOPASSWD: /usr/bin/wg show all dump
-tunneldeck-agent ALL=(root) NOPASSWD: /usr/sbin/nft list ruleset
-tunneldeck-agent ALL=(root) NOPASSWD: /usr/bin/sha256sum /etc/wireguard/wg0.conf
-tunneldeck-agent ALL=(root) NOPASSWD: /usr/bin/sha256sum /opt/AdGuardHome/AdGuardHome.yaml
+# Rendered by tunneldeck-install after strict management-user validation.
+@MANAGEMENT_USER@ ALL=(tunneldeck-agent) NOPASSWD: /usr/local/libexec/tunneldeck-agent agent-version
+@MANAGEMENT_USER@ ALL=(tunneldeck-agent) NOPASSWD: /usr/local/libexec/tunneldeck-agent agent-status
+@MANAGEMENT_USER@ ALL=(tunneldeck-agent) NOPASSWD: /usr/local/libexec/tunneldeck-agent telemetry-summary
+@MANAGEMENT_USER@ ALL=(tunneldeck-agent) NOPASSWD: /usr/local/libexec/tunneldeck-agent telemetry-latest
+@MANAGEMENT_USER@ ALL=(tunneldeck-agent) NOPASSWD: /usr/local/libexec/tunneldeck-agent ^telemetry-samples --cursor [0-9]+ --limit ([1-9][0-9]{0,3}|10000)$
+@MANAGEMENT_USER@ ALL=(tunneldeck-agent) NOPASSWD: /usr/local/libexec/tunneldeck-agent ^telemetry-events --cursor [0-9]+ --limit ([1-9][0-9]{0,3}|10000)$
+@MANAGEMENT_USER@ ALL=(tunneldeck-agent) NOPASSWD: /usr/local/libexec/tunneldeck-agent ^telemetry-peers --cursor [0-9]+ --limit ([1-9][0-9]{0,3}|10000)$
+@MANAGEMENT_USER@ ALL=(tunneldeck-agent) NOPASSWD: /usr/local/libexec/tunneldeck-agent ^telemetry-adguard --cursor [0-9]+ --limit ([1-9][0-9]{0,3}|10000)$

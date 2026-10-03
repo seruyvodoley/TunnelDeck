@@ -19,7 +19,8 @@ final class AppViewModel: ObservableObject {
     @Published var showOnboarding: Bool
     @Published var statusMessage = "Read-only mode"
     @Published var helperVersion: String?
-    @Published var helperCapabilities: HelperCapabilities?
+    @Published var helperCapabilities: LegacyHelperCapabilities?
+    @Published var helper2Capabilities: Helper2Capabilities?
     @Published var helperError: AppError?
     @Published var backups: [BackupRecord] = []
     @Published var presentedError: AppError?
@@ -59,6 +60,8 @@ final class AppViewModel: ObservableObject {
     let adGuardAPI = AdGuardAPIService()
     let localDNS = LocalDNSService()
     lazy var helper = HelperService(ssh: ssh)
+    lazy var helper2 = Helper2Service(ssh: ssh)
+    lazy var remediationController = RemediationController(helper2: helper2)
     lazy var agent = AgentService(ssh: ssh)
     private let history = DiagnosticHistoryStore()
     private let activityStore = ActivityStore()
@@ -210,6 +213,7 @@ final class AppViewModel: ObservableObject {
     }
 
     func refreshHelper() async {
+        helper2Capabilities = await remediationController.capabilities(configuration: configuration)
         if let capabilities = await helper.capabilities(configuration: configuration) {
             helperCapabilities = capabilities; helperVersion = capabilities.version; helperError = nil
             backups = (try? await helper.listBackups(configuration: configuration)) ?? []

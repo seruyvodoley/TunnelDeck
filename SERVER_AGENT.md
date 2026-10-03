@@ -16,4 +16,6 @@ The app requests 2,000 rows per page and bounds one synchronization to 16 pages 
 
 The systemd timer runs once per minute with no ambient capabilities, a read-only system, protected homes, private temporary/device namespaces, and only `/var/lib/tunneldeck` writable. Four exact sudoers commands provide WireGuard dump, nftables evidence, and two configuration hashes; they cannot mutate configuration or read raw config contents into the database. This narrow sudo boundary is why `NoNewPrivileges` cannot be enabled for the agent service; replacing it with a dedicated read broker is a future hardening option.
 
+The telemetry database and directory remain owned by `tunneldeck-agent` with directory mode `0750`; the management SSH account never receives filesystem access. TunnelDeck invokes only the read API as `sudo -n -u tunneldeck-agent /usr/local/libexec/tunneldeck-agent <command>`. Installation renders a management-user-specific sudoers fragment after strict username and `visudo -cf` validation. Exact rules cover status/summary commands and anchored argument regular expressions cover paginated history. `collect`, alternate binary paths, arbitrary arguments and shells are not allowed.
+
 Nothing is installed automatically. Deployment requires a separately approved `--apply` invocation.

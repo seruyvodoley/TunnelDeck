@@ -1,5 +1,11 @@
 # Recovery
 
+## Server component installation rollback
+
+The transactional installer snapshots every Agent binary, unit and sudoers file including existence, content, SHA-256, ownership and mode, plus timer enabled/active and service active state. Candidates are staged on the target filesystem, validated and atomically renamed. Any validation, start or verification failure restores old files and systemd state; files absent before a first install are removed. Agent uninstall preserves `/var/lib/tunneldeck/telemetry.sqlite3` unless `--purge-data` is explicitly supplied.
+
+Helper 2 is installed only at `/usr/local/libexec/tunneldeck-helper2`. Its installation and recovery never modify `/usr/local/libexec/tunneldeck-helper`, the reviewed 1.2.1 recovery path.
+
 ## Mac sleep and monitoring gaps
 
 Closing a MacBook pauses local observation; it is not evidence that a VPS went offline. Existing SQLite rows remain available for seven days. On wake TunnelDeck reloads them before making a new check. A gap is rendered as a gap and labelled stale rather than filled with synthetic samples.

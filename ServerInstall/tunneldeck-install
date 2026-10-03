@@ -1,40 +1,4 @@
 #!/bin/sh
 set -eu
-
-ACTION="${1:-}"
-MODE="${2:---preview}"
-case "$ACTION" in install-agent|install-helper|upgrade-agent|upgrade-helper|uninstall-agent) ;; *) echo "usage: $0 {install-agent|install-helper|upgrade-agent|upgrade-helper|uninstall-agent} [--preview|--apply]" >&2; exit 2;; esac
-case "$MODE" in --preview|--apply) ;; *) echo "invalid mode" >&2; exit 2;; esac
-
-echo "TunnelDeck installer preview: $ACTION"
-echo "No changes are made unless --apply is supplied."
-[ "$MODE" = "--preview" ] && exit 0
-[ "$(id -u)" -eq 0 ] || { echo "--apply requires root" >&2; exit 3; }
-
-ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-BACKUP="/var/lib/tunneldeck/install-backups/$(date -u +%Y%m%dT%H%M%SZ)"
-mkdir -p "$BACKUP"
-SUCCESS=0
-rollback() { [ ! -f "$BACKUP/tunneldeck-agent" ] || install -m 0755 "$BACKUP/tunneldeck-agent" /usr/local/libexec/tunneldeck-agent; [ ! -f "$BACKUP/tunneldeck-helper" ] || install -m 0755 "$BACKUP/tunneldeck-helper" /usr/local/libexec/tunneldeck-helper; }
-trap '[ "$SUCCESS" -eq 1 ] || rollback' EXIT HUP INT TERM
-
-install_agent() {
-  id tunneldeck-agent >/dev/null 2>&1 || useradd --system --home /var/lib/tunneldeck --shell /usr/sbin/nologin tunneldeck-agent
-  install -d -o tunneldeck-agent -g tunneldeck-agent -m 0750 /var/lib/tunneldeck
-  [ ! -e /usr/local/libexec/tunneldeck-agent ] || cp -a /usr/local/libexec/tunneldeck-agent "$BACKUP/"
-  install -m 0755 "$ROOT/ServerAgent/tunneldeck_agent.py" /usr/local/libexec/tunneldeck-agent
-  install -m 0644 "$ROOT/ServerAgent/tunneldeck-agent.service" /etc/systemd/system/tunneldeck-agent.service
-  install -m 0644 "$ROOT/ServerAgent/tunneldeck-agent.timer" /etc/systemd/system/tunneldeck-agent.timer
-  install -m 0440 "$ROOT/ServerAgent/tunneldeck-agent.sudoers" /etc/sudoers.d/tunneldeck-agent
-  visudo -cf /etc/sudoers.d/tunneldeck-agent >/dev/null
-  systemctl daemon-reload; systemctl enable --now tunneldeck-agent.timer
-  /usr/local/libexec/tunneldeck-agent agent-version >/dev/null
-}
-install_helper() {
-  [ ! -e /usr/local/libexec/tunneldeck-helper ] || cp -a /usr/local/libexec/tunneldeck-helper "$BACKUP/"
-  install -m 0755 "$ROOT/ServerHelper2/tunneldeck_helper2.py" /usr/local/libexec/tunneldeck-helper
-  /usr/local/libexec/tunneldeck-helper helper-info >/dev/null
-}
-case "$ACTION" in install-agent|upgrade-agent) install_agent;; install-helper|upgrade-helper) install_helper;; uninstall-agent) systemctl disable --now tunneldeck-agent.timer || true; rm -f /etc/systemd/system/tunneldeck-agent.timer /etc/systemd/system/tunneldeck-agent.service /usr/local/libexec/tunneldeck-agent; systemctl daemon-reload;; esac
-SUCCESS=1
-trap - EXIT HUP INT TERM
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+exec python3 "$SCRIPT_DIR/tunneldeck_install.py" "$@"
