@@ -129,7 +129,7 @@ final class AppViewModel: ObservableObject {
 
     func selectServer(_ id: UUID) {
         guard let server = servers.first(where: { $0.id == id }) else { return }
-        nodeOperations.advance();refreshCadence.reset();cpuDeltaTracker.reset();securityOperation.cancel();nodeLoadTask?.cancel();wakeTask?.cancel();agentSyncTask?.cancel();alertSaveTask?.cancel();healthCheckTask?.cancel();agentSyncTask=nil;agentSyncToken=nil;refreshToken=nil;healthCheckToken=nil;isRefreshing=false;isRunningHealthCheck=false
+        nodeOperations.advance();refreshCadence.reset();cpuDeltaTracker.reset();securityOperation.cancel();nodeLoadTask?.cancel();wakeTask?.cancel();agentSyncTask?.cancel();alertSaveTask?.cancel();healthCheckTask?.cancel();healthCheckTask=nil;agentSyncTask=nil;agentSyncToken=nil;refreshToken=nil;healthCheckToken=nil;isRefreshing=false;isRunningHealthCheck=false
         activeServerID = id; UserDefaults.standard.set(id.uuidString, forKey: "activeServerID"); settings.host = server.host; settings.port = server.port; settings.username = server.username; settings.keyPath = server.keyPath;isRefreshingSecurity=false
         system = SystemSnapshot(); wireGuard = WireGuardSnapshot(); units = []; listeners = []; healthReport = nil; security = SecuritySnapshot(); exposureEndpoints=[];monitoringSamples = []; monitoringEvents = []; peerHistory=[];adGuardHistory=[];incidents=[];alertRules=[];alertStates=[:];alertEvents=[];configurationBaseline=nil;baselineDrift=[];lastPeerHistorySample=nil;lastAdGuardHistorySample=nil;loadServerScopedState()
         saveSettings();nodeLoadTask=Task{[weak self] in guard let self else{return};await self.loadMonitoringHistory();guard !Task.isCancelled else{return};await self.syncAgentHistory();guard !Task.isCancelled else{return};await self.loadMonitoringHistory();await self.loadBaseline();guard !Task.isCancelled else{return};await self.refresh()}
@@ -150,7 +150,7 @@ final class AppViewModel: ObservableObject {
         lifecycleObservers.append(center.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in Task { @MainActor in self?.resumeAfterWake() } })
     }
 
-    private func prepareForSleep() { isMacSleeping=true;nodeOperations.advance();cpuDeltaTracker.reset();securityOperation.cancel();wakeTask?.cancel();nodeLoadTask?.cancel();agentSyncTask?.cancel();healthCheckTask?.cancel();agentSyncTask=nil;agentSyncToken=nil;refreshToken=nil;healthCheckToken=nil;isRefreshing=false;isRefreshingSecurity=false;isRunningHealthCheck=false;pollingCoordinator.stop(); statusMessage = "Monitoring paused while Mac sleeps" }
+    private func prepareForSleep() { isMacSleeping=true;nodeOperations.advance();cpuDeltaTracker.reset();securityOperation.cancel();wakeTask?.cancel();nodeLoadTask?.cancel();agentSyncTask?.cancel();healthCheckTask?.cancel();healthCheckTask=nil;agentSyncTask=nil;agentSyncToken=nil;refreshToken=nil;healthCheckToken=nil;isRefreshing=false;isRefreshingSecurity=false;isRunningHealthCheck=false;pollingCoordinator.stop(); statusMessage = "Monitoring paused while Mac sleeps" }
 
     func resumeAfterWake() {
         isMacSleeping=false
