@@ -474,6 +474,38 @@ import Testing
     let coordinator=PollingCoordinator();coordinator.start(interval:{3600},operation:{});let first=coordinator.generation;coordinator.start(interval:{3600},operation:{});#expect(coordinator.generation == first+1);coordinator.stop()
 }
 
+@MainActor @Test func nodeOperationGuardRejectsStaleNodeResponses() {
+    let guardrail=NodeOperationGuard(),nodeA=UUID(),nodeB=UUID(),capture=guardrail.capture(nodeID:nodeA)
+    #expect(guardrail.accepts(nodeID:nodeA,generation:capture.1,activeNodeID:nodeA))
+    guardrail.advance()
+    #expect(!guardrail.accepts(nodeID:nodeA,generation:capture.1,activeNodeID:nodeB))
+}
+
+@MainActor @Test func refreshCadencePreventsDuplicateMediumWork() {
+    let cadence=RefreshCadenceController(),start=Date()
+    #expect(cadence.shouldRun("medium",every:60,now:start))
+    #expect(!cadence.shouldRun("medium",every:60,now:start.addingTimeInterval(59)))
+    #expect(cadence.shouldRun("medium",every:60,now:start.addingTimeInterval(60)))
+    cadence.reset();#expect(cadence.shouldRun("medium",every:60,now:start))
+}
+
+@Test func chartDownsamplingPreservesEndpointsSpikesAndGaps() {
+    let node=UUID(),start=Date();let values=(0..<10_080).map{index in MonitoringSample(nodeID:node,id:UUID(),timestamp:start.addingTimeInterval(Double(index*60)),cpuPercent:index==5_000 ? 100:10,memoryPercent:index==7_000 ? 99:20,diskPercent:30,pingMilliseconds:index==8_000 ? 2_000:20,vpsState:.online,wireGuardState:.online,adGuardState:.online,antiZapretState:.online,publicDNSExposed:false,publicListeners:[]) }
+    let rendered=ChartDownsampler.monitoring(values,maxPoints:1_200)
+    #expect(rendered.count<=1_200);#expect(rendered.first?.id==values.first?.id);#expect(rendered.last?.id==values.last?.id)
+    #expect(rendered.contains{$0.cpuPercent==100});#expect(rendered.contains{$0.memoryPercent==99});#expect(rendered.contains{$0.pingMilliseconds==2_000})
+    let gapValues=[values[0],values[1],values[100]]
+    #expect(MonitoringHistory.segments(gapValues,expectedInterval:60,timestamp:\.timestamp).count==2)
+}
+
+@Test func sqliteSinceQueriesAndLatestSamplesAvoidFullHistoryLoads() async throws {
+    let root=FileManager.default.temporaryDirectory.appendingPathComponent("SinceQueries-\(UUID())");try FileManager.default.createDirectory(at:root,withIntermediateDirectories:true);defer{try? FileManager.default.removeItem(at:root)}
+    let store=try InfrastructureStore(url:root.appendingPathComponent("db.sqlite3")),node=InfrastructureNode(id:UUID(),name:"Fixture",role:.primary,customRole:nil,host:"fixture.invalid",sshPort:22,createdAt:Date(),updatedAt:Date(),enabled:true);try await store.upsert(node:node);let now=Date()
+    for offset in [-8_000.0,-100.0]{try await store.insert(sample:MonitoringSample(nodeID:node.id,id:UUID(),timestamp:now.addingTimeInterval(offset),cpuPercent:1,memoryPercent:2,diskPercent:3,pingMilliseconds:nil,vpsState:.online,wireGuardState:.online,adGuardState:.online,antiZapretState:.online,publicDNSExposed:false,publicListeners:[]),nodeID:node.id)}
+    #expect(try await store.samples(nodeID:node.id,since:now.addingTimeInterval(-3_600)).count==1)
+    #expect(try await store.latestSamples()[node.id]?.timestamp==now.addingTimeInterval(-100))
+}
+
 @Test func agentPaginationSynchronizesSevenDayBacklogWithoutDuplicates() async throws {
     let total=10_080,pageSize=2_000;var persisted=Set<Int>(),checkpoints:[Int64]=[]
     let result=try await AgentSyncController().paginate(initialCursor:0,safety:AgentPaginationSafety(pageSize:pageSize,maxPages:16,maxRecords:25_000),fetch:{cursor,limit in let start=Int(cursor),end=min(total,start+limit);return AgentPage(items:start<end ? Array((start+1)...end):[],nextCursor:Int64(end))},persist:{items in persisted.formUnion(items)},checkpoint:{checkpoints.append($0)})
