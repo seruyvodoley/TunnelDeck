@@ -1,10 +1,18 @@
-# TunnelDeck 2.1.0
+# TunnelDeck 2.1.1
 
 Server deployment keeps three explicit trust boundaries: the app reaches the Agent read API through narrowly scoped `sudo -u tunneldeck-agent`, legacy Helper 1.2.1 remains at its stable path, and transactional Helper 2.0 is installed side-by-side as `tunneldeck-helper2`. The installer provides structured non-mutating preview, validated atomic installation, systemd state restoration and first-install rollback without deleting telemetry by default.
 
 TunnelDeck distinguishes live, stale, unknown, and explicitly observed offline state. Local charts retain seven days, explain Mac sleep gaps, and never synthesize missing observations. The optional Server Agent 2.0 design adds cursor-based catch-up history while keeping read-only collection separate from Helper 2.0 transactional remediation. See `SERVER_AGENT.md`, `HELPER_PROTOCOL.md`, and `SECURITY_MODEL.md`; nothing is installed automatically.
 
 TunnelDeck preserves helper 1.2.1 compatibility while adding a local, read-only-first fleet operations layer. Agent/Helper 2.0 deployment remains an explicitly separate, preview-first operation.
+
+## TunnelDeck 2.1.1 release notes
+
+- Node-scoped telemetry identity prevents one server profile from consuming another profile's Agent history.
+- Multi-node refresh and monitoring writes now retain their captured node context across every async boundary.
+- Server profiles can be safely merged or deleted with explicit confirmation.
+- SSH process cleanup prevents descriptor growth and rapid-switch crashes.
+- SQLite schema v5 migrates existing telemetry transactionally without deleting legacy files or secrets.
 
 ## TunnelDeck 2.1.0 release notes
 
