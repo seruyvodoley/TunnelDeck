@@ -62,6 +62,16 @@ struct SettingsView: View {
                     Button("Add New Server") { model.saveNewServer(name:state.serverName,role:state.serverRole) }
                         .disabled(!state.valid || model.settings.host.isEmpty)
                 }
+                if let selected=model.activeServerID,model.servers.count>1{
+                    Picker("Merge history into",selection:$state.mergeTarget){
+                        Text("Choose server…").tag(UUID?.none)
+                        ForEach(model.servers.filter{$0.id != selected}){server in Text(server.name).tag(Optional(server.id))}
+                    }
+                    HStack{
+                        Button("Merge History & Delete…",role:.destructive){state.pendingDelete=selected;state.deleteMode = .merge;state.confirmDelete=true}.disabled(state.mergeTarget==nil)
+                        Button("Delete Profile & Local Data…",role:.destructive){state.pendingDelete=selected;state.deleteMode = .delete;state.confirmDelete=true}
+                    }
+                }
                 Text("Servers are stored separately. TunnelDeck never copies or migrates configuration between VPS instances.").foregroundStyle(.secondary)
             }
             Section("Polling") {
@@ -94,6 +104,7 @@ struct SettingsView: View {
                 KeyValueRow(key:"Last refresh",value:model.lastRefreshDuration.map{String(format:"%.2f s",$0)} ?? "Never")
                 KeyValueRow(key:"Last Agent sync",value:model.lastAgentSyncAt?.formatted() ?? "Never")
                 KeyValueRow(key:"Loaded rows",value:"samples \(model.monitoringSamples.count), events \(model.monitoringEvents.count), peers \(model.peerHistory.count), DNS \(model.adGuardHistory.count)")
+                KeyValueRow(key:"Local sample range",value:model.monitoringSamples.first.map{"\($0.timestamp.formatted()) → \(model.monitoringSamples.last?.timestamp.formatted() ?? "—")"} ?? "No samples")
                 KeyValueRow(key:"SQLite schema",value:model.sqliteSchemaVersion.map(String.init) ?? "Unavailable")
                 KeyValueRow(key:"Agent cursors",value:"S \(model.agentCursors.samples), E \(model.agentCursors.events), P \(model.agentCursors.peers), D \(model.agentCursors.adGuard)")
                 if let error=model.persistenceErrorMessage{Text(error).foregroundStyle(.orange).textSelection(.enabled)}
@@ -109,16 +120,25 @@ struct SettingsView: View {
             } message: {
                 Text("Write Mode allows TunnelDeck to change configuration on the VPS. Automatic backups will be created before every configuration change.")
             }
+            .confirmationDialog(state.deleteMode == .merge ? "Merge local history and delete profile?":"Delete profile and all local node data?",isPresented:$state.confirmDelete,titleVisibility:.visible){
+                Button(state.deleteMode == .merge ? "Merge and Delete":"Delete Profile and Data",role:.destructive){if let id=state.pendingDelete{Task{await model.deleteServer(id,mergeInto:state.deleteMode == .merge ? state.mergeTarget:nil)}}}
+                Button("Cancel",role:.cancel){}
+            } message:{Text("This removes the selected profile and its Keychain SSH-key-path entry. Server infrastructure is not changed.")}
     }
 }
 
 @MainActor
 private final class SettingsScreenState: ObservableObject {
+    enum DeleteMode{case merge,delete}
     @Published var confirmWriteMode=false
     @Published var serverName="Primary VPS"
     @Published var serverRole="Primary"
+    @Published var mergeTarget:UUID?
+    @Published var pendingDelete:UUID?
+    @Published var deleteMode:DeleteMode = .delete
+    @Published var confirmDelete=false
     var valid:Bool{!serverName.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty && !serverRole.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty}
-    func reflect(server:ServerProfile?){guard let server else{return};serverName=server.name;serverRole=server.role}
+    func reflect(server:ServerProfile?){guard let server else{return};serverName=server.name;serverRole=server.role;mergeTarget=nil}
 }
 
 struct OnboardingView: View {

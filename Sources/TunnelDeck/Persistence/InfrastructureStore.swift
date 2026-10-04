@@ -9,7 +9,7 @@ enum PersistenceError: Error, LocalizedError {
 }
 
 actor InfrastructureStore {
-    static let currentSchemaVersion = 4
+    static let currentSchemaVersion = 5
     private nonisolated(unsafe) var database: OpaquePointer?
     let url: URL
 
@@ -79,6 +79,22 @@ actor InfrastructureStore {
     func alertStates(nodeID:UUID)throws->[UUID:AlertRuntimeState]{Dictionary(uniqueKeysWithValues:try query("SELECT rule_id,payload FROM alert_state WHERE node_id=?",[.text(nodeID.uuidString)]){s in (UUID(uuidString:Self.text(s,0))!,try JSONDecoder().decode(AlertRuntimeState.self,from:Data(Self.text(s,1).utf8)))})}
     func saveAgentSyncCursors(_ cursors:AgentSyncCursors,nodeID:UUID)throws{for(stream,cursor)in[("samples",cursors.samples),("events",cursors.events),("peers",cursors.peers),("adguard",cursors.adGuard)]{try run("INSERT INTO agent_sync_state(node_id,stream,cursor) VALUES(?,?,?) ON CONFLICT(node_id,stream) DO UPDATE SET cursor=excluded.cursor",[.text(nodeID.uuidString),.text(stream),.integer64(UInt64(max(0,cursor)))])}}
     func agentSyncCursors(nodeID:UUID)throws->AgentSyncCursors{let values=Dictionary(uniqueKeysWithValues:try query("SELECT stream,cursor FROM agent_sync_state WHERE node_id=?",[.text(nodeID.uuidString)]){s in(Self.text(s,0),sqlite3_column_int64(s,1))});return AgentSyncCursors(samples:values["samples"] ?? 0,events:values["events"] ?? 0,peers:values["peers"] ?? 0,adGuard:values["adguard"] ?? 0)}
+    func resetAgentSyncCursors(nodeID:UUID)throws{try run("DELETE FROM agent_sync_state WHERE node_id=?",[.text(nodeID.uuidString)])}
+    func deleteNode(_ nodeID:UUID)throws{try run("DELETE FROM nodes WHERE id=?",[.text(nodeID.uuidString)])}
+    func mergeNodeData(from source:UUID,into destination:UUID)throws{
+        guard source != destination else{return}
+        try transaction {
+            for table in ["monitoring_samples","infrastructure_events","peer_history","adguard_history"] {
+                try run("INSERT OR IGNORE INTO \(table) SELECT ? AS node_id,id,timestamp" + Self.mergeTail(table) + " FROM \(table) WHERE node_id=?",[.text(destination.uuidString),.text(source.uuidString)])
+            }
+            try run("DELETE FROM nodes WHERE id=?",[.text(source.uuidString)])
+        }
+    }
+
+    func persistAgentSamples(_ samples:[MonitoringSample],nodeID:UUID,cursors:AgentSyncCursors)throws{try transaction{for sample in samples{try insert(sample:sample,nodeID:nodeID)};try saveAgentSyncCursors(cursors,nodeID:nodeID)}}
+    func persistAgentEvents(_ events:[InfrastructureEvent],nodeID:UUID,cursors:AgentSyncCursors)throws{try transaction{for event in events{try insert(event:event)};try saveAgentSyncCursors(cursors,nodeID:nodeID)}}
+    func persistAgentPeers(_ peers:[PeerHistorySample],nodeID:UUID,cursors:AgentSyncCursors)throws{try transaction{for peer in peers{try insert(peer:peer)};try saveAgentSyncCursors(cursors,nodeID:nodeID)}}
+    func persistAgentAdGuard(_ values:[AdGuardHistorySample],nodeID:UUID,cursors:AgentSyncCursors)throws{try transaction{for value in values{try insert(adGuard:value)};try saveAgentSyncCursors(cursors,nodeID:nodeID)}}
     private func prune(_ table:String,_ nodeID:UUID,_ now:Date)throws{try run("DELETE FROM \(table) WHERE node_id=? AND timestamp<?",[.text(nodeID.uuidString),.real(now.addingTimeInterval(-604_800).timeIntervalSince1970)])}
 
     private static func configure(_ db: OpaquePointer?) throws {
@@ -125,6 +141,43 @@ actor InfrastructureStore {
         if current < 4 {
             try exec(db,"BEGIN IMMEDIATE")
             do { try exec(db,"CREATE TABLE agent_sync_state(node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,stream TEXT NOT NULL,cursor INTEGER NOT NULL,PRIMARY KEY(node_id,stream)); PRAGMA user_version=4;");try exec(db,"COMMIT") } catch { try? exec(db,"ROLLBACK");throw error }
+        }
+        if current < 5 { try migrateTelemetryIdentityToV5(db) }
+    }
+
+    private static func migrateTelemetryIdentityToV5(_ db:OpaquePointer?)throws{
+        let tables=["monitoring_samples","infrastructure_events","peer_history","adguard_history"]
+        let definitions:[String:String]=[
+            "monitoring_samples":"node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,id TEXT NOT NULL,timestamp REAL NOT NULL,cpu REAL NOT NULL,memory REAL NOT NULL,disk REAL NOT NULL,ping REAL,vps_state TEXT NOT NULL,wg_state TEXT NOT NULL,adguard_state TEXT NOT NULL,antizapret_state TEXT NOT NULL,public_dns INTEGER NOT NULL,public_listeners TEXT NOT NULL,PRIMARY KEY(node_id,id)",
+            "infrastructure_events":"node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,id TEXT NOT NULL,timestamp REAL NOT NULL,component_id TEXT NOT NULL,kind TEXT NOT NULL,title TEXT NOT NULL,detail TEXT NOT NULL,state TEXT NOT NULL,is_recovery INTEGER NOT NULL,PRIMARY KEY(node_id,id)",
+            "peer_history":"node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,id TEXT NOT NULL,timestamp REAL NOT NULL,peer_id TEXT NOT NULL,name TEXT NOT NULL,vpn_ip TEXT NOT NULL,state TEXT NOT NULL,rx INTEGER NOT NULL,tx INTEGER NOT NULL,latest_handshake REAL,PRIMARY KEY(node_id,id)",
+            "adguard_history":"node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,id TEXT NOT NULL,timestamp REAL NOT NULL,total_queries INTEGER NOT NULL,blocked_queries INTEGER NOT NULL,blocked_percentage REAL NOT NULL,average_processing_time REAL NOT NULL,PRIMARY KEY(node_id,id)"
+        ]
+        let columns:[String:String]=[
+            "monitoring_samples":"node_id,id,timestamp,cpu,memory,disk,ping,vps_state,wg_state,adguard_state,antizapret_state,public_dns,public_listeners",
+            "infrastructure_events":"node_id,id,timestamp,component_id,kind,title,detail,state,is_recovery",
+            "peer_history":"node_id,id,timestamp,peer_id,name,vpn_ip,state,rx,tx,latest_handshake",
+            "adguard_history":"node_id,id,timestamp,total_queries,blocked_queries,blocked_percentage,average_processing_time"
+        ]
+        try exec(db,"BEGIN IMMEDIATE")
+        do{
+            for table in tables {
+                let before=try scalar(db,"SELECT count(*) FROM \(table)")
+                try exec(db,"CREATE TABLE \(table)_v5(\(definitions[table]!)); INSERT INTO \(table)_v5(\(columns[table]!)) SELECT \(columns[table]!) FROM \(table);")
+                guard try scalar(db,"SELECT count(*) FROM \(table)_v5")==before else{throw PersistenceError.execute("v5 copy validation failed for \(table)")}
+            }
+            for table in tables { try exec(db,"DROP TABLE \(table); ALTER TABLE \(table)_v5 RENAME TO \(table);") }
+            try exec(db,"CREATE INDEX monitoring_node_time ON monitoring_samples(node_id,timestamp); CREATE INDEX events_node_time ON infrastructure_events(node_id,timestamp); CREATE INDEX peer_history_node_time ON peer_history(node_id,timestamp); CREATE INDEX adguard_history_node_time ON adguard_history(node_id,timestamp); PRAGMA user_version=5; COMMIT")
+        }catch{try? exec(db,"ROLLBACK");throw error}
+    }
+
+    private static func mergeTail(_ table:String)->String{
+        switch table {
+        case "monitoring_samples":return ",cpu,memory,disk,ping,vps_state,wg_state,adguard_state,antizapret_state,public_dns,public_listeners"
+        case "infrastructure_events":return ",component_id,kind,title,detail,state,is_recovery"
+        case "peer_history":return ",peer_id,name,vpn_ip,state,rx,tx,latest_handshake"
+        case "adguard_history":return ",total_queries,blocked_queries,blocked_percentage,average_processing_time"
+        default:return ""
         }
     }
 

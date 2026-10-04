@@ -18,6 +18,7 @@ struct CommandResult: Sendable {
 
 actor SSHService {
     private var processes: [UUID: Process] = [:]
+    func activeProcessCount() -> Int { processes.count }
 
     func execute(_ command: ReadCommand, configuration: SSHConfiguration) async throws -> CommandResult {
         try CommandPolicy.validate(host: configuration.host, username: configuration.username, keyPath: configuration.keyPath)
@@ -49,9 +50,16 @@ actor SSHService {
     }
 
     func cancelAll() {
-        processes.values.forEach { $0.terminate() }
+        processes.values.filter(\.isRunning).forEach { $0.terminate() }
         processes.removeAll()
     }
+
+    private func cancel(_ identifier: UUID) {
+        guard let process = processes[identifier], process.isRunning else { return }
+        process.terminate()
+    }
+
+    private func finished(_ identifier: UUID) { processes.removeValue(forKey: identifier) }
 
     func downloadBackup(remotePath: String, destination: URL, configuration: SSHConfiguration) async throws {
         guard remotePath.range(of: #"^/root/tunneldeck-backups/[A-Za-z0-9_-]+$"#, options: .regularExpression) != nil else { throw CommandPolicyError.deniedCommand }
@@ -95,7 +103,7 @@ actor SSHService {
         processes[identifier] = process
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
-                process.terminationHandler = { process in
+                process.terminationHandler = { [weak self] process in
                     let stdout = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
                     let stderr = String(decoding: error.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
                     continuation.resume(returning: CommandResult(
@@ -104,11 +112,17 @@ actor SSHService {
                         exitCode: process.terminationStatus,
                         duration: Date().timeIntervalSince(started)
                     ))
+                    process.terminationHandler = nil
+                    Task { await self?.finished(identifier) }
                 }
-                do { try process.run() } catch { continuation.resume(throwing: error) }
+                do { try process.run() } catch {
+                    process.terminationHandler = nil
+                    processes.removeValue(forKey: identifier)
+                    continuation.resume(throwing: error)
+                }
             }
         } onCancel: {
-            process.terminate()
+            Task { await self.cancel(identifier) }
         }
     }
 
