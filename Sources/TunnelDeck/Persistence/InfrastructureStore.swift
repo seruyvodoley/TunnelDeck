@@ -9,7 +9,7 @@ enum PersistenceError: Error, LocalizedError {
 }
 
 actor InfrastructureStore {
-    static let currentSchemaVersion = 5
+    static let currentSchemaVersion = 6
     private nonisolated(unsafe) var database: OpaquePointer?
     let url: URL
 
@@ -95,6 +95,17 @@ actor InfrastructureStore {
     func persistAgentEvents(_ events:[InfrastructureEvent],nodeID:UUID,cursors:AgentSyncCursors)throws{try transaction{for event in events{try insert(event:event)};try saveAgentSyncCursors(cursors,nodeID:nodeID)}}
     func persistAgentPeers(_ peers:[PeerHistorySample],nodeID:UUID,cursors:AgentSyncCursors)throws{try transaction{for peer in peers{try insert(peer:peer)};try saveAgentSyncCursors(cursors,nodeID:nodeID)}}
     func persistAgentAdGuard(_ values:[AdGuardHistorySample],nodeID:UUID,cursors:AgentSyncCursors)throws{try transaction{for value in values{try insert(adGuard:value)};try saveAgentSyncCursors(cursors,nodeID:nodeID)}}
+    func save(homeNetwork value:HomeNetwork)throws{try run("INSERT INTO home_networks(id,name,cidr,router_ip,notes,created_at,updated_at,is_active) VALUES(?,?,?,?,?,?,?,1) ON CONFLICT(id) DO UPDATE SET name=excluded.name,cidr=excluded.cidr,router_ip=excluded.router_ip,notes=excluded.notes,updated_at=excluded.updated_at,is_active=1",[.text(value.id.uuidString),.text(value.name),.text(value.cidr),.text(value.routerIP),.text(value.notes),.date(value.createdAt),.date(value.updatedAt)])}
+    func activeHomeNetwork()throws->HomeNetwork?{try query("SELECT id,name,cidr,router_ip,notes,created_at,updated_at FROM home_networks WHERE is_active=1 ORDER BY updated_at DESC LIMIT 1"){s in HomeNetwork(id:UUID(uuidString:Self.text(s,0))!,name:Self.text(s,1),cidr:Self.text(s,2),routerIP:Self.text(s,3),notes:Self.text(s,4),createdAt:Self.date(s,5),updatedAt:Self.date(s,6))}.first}
+    func save(homeDevice value:HomeDevice,observation:HomeDeviceObservation?=nil)throws{let sources=String(data:try JSONEncoder().encode(value.discoverySources),encoding:.utf8) ?? "[]";try transaction{try run("""
+        INSERT INTO home_devices(id,display_name,hostname,ipv4,ipv6,mac_address,vendor,type,custom_type,status,last_seen,first_seen,sources,is_pinned,notes,preferred_url,preferred_ssh,name_manual,type_manual,evidence,last_success)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET display_name=excluded.display_name,hostname=excluded.hostname,ipv4=excluded.ipv4,ipv6=excluded.ipv6,mac_address=excluded.mac_address,vendor=excluded.vendor,type=excluded.type,custom_type=excluded.custom_type,status=excluded.status,last_seen=excluded.last_seen,sources=excluded.sources,is_pinned=excluded.is_pinned,notes=excluded.notes,preferred_url=excluded.preferred_url,preferred_ssh=excluded.preferred_ssh,name_manual=excluded.name_manual,type_manual=excluded.type_manual,evidence=excluded.evidence,last_success=excluded.last_success
+        """,[.text(value.id.uuidString),.text(value.displayName),.optional(value.hostname),.optional(value.ipv4),.optional(value.ipv6),.optional(value.macAddress),.optional(value.vendor),.text(value.type.rawValue),.optional(value.customType),.text(value.status.rawValue),value.lastSeen.map(Binding.date) ?? .null,.date(value.firstSeen),.text(sources),.integer(value.isPinned ? 1:0),.optional(value.notes),.optional(value.preferredAccessURL),.optional(value.preferredSSHHost),.integer(value.nameIsManual ? 1:0),.integer(value.typeIsManual ? 1:0),.optional(value.reachabilityEvidence),value.lastSuccessfulObservation.map(Binding.date) ?? .null]);for(address,family)in[(value.ipv4,"ipv4"),(value.ipv6,"ipv6")]{if let address{try run("INSERT INTO home_device_addresses(device_id,address,family,last_seen) VALUES(?,?,?,?) ON CONFLICT(device_id,address) DO UPDATE SET last_seen=excluded.last_seen",[.text(value.id.uuidString),.text(address),.text(family),.date(value.lastSeen ?? Date())])}};if let observation{try insertHomeObservation(observation)};try run("DELETE FROM home_device_observations WHERE timestamp<?",[.date(Date().addingTimeInterval(-2_592_000))])}}
+    func homeDevices()throws->[HomeDevice]{try query("SELECT id,display_name,hostname,ipv4,ipv6,mac_address,vendor,type,custom_type,status,last_seen,first_seen,sources,is_pinned,notes,preferred_url,preferred_ssh,name_manual,type_manual,evidence,last_success FROM home_devices ORDER BY is_pinned DESC,display_name COLLATE NOCASE"){s in let sources=(try? JSONDecoder().decode(Set<HomeDiscoverySource>.self,from:Data(Self.text(s,12).utf8))) ?? [];return HomeDevice(id:UUID(uuidString:Self.text(s,0))!,displayName:Self.text(s,1),hostname:Self.optionalText(s,2),ipv4:Self.optionalText(s,3),ipv6:Self.optionalText(s,4),macAddress:Self.optionalText(s,5),vendor:Self.optionalText(s,6),type:HomeDeviceType(rawValue:Self.text(s,7)) ?? .unknown,customType:Self.optionalText(s,8),status:HomeDeviceReachability(rawValue:Self.text(s,9)) ?? .unknown,lastSeen:Self.optionalDate(s,10),firstSeen:Self.date(s,11),discoverySources:sources,isPinned:sqlite3_column_int(s,13) != 0,notes:Self.optionalText(s,14),preferredAccessURL:Self.optionalText(s,15),preferredSSHHost:Self.optionalText(s,16),nameIsManual:sqlite3_column_int(s,17) != 0,typeIsManual:sqlite3_column_int(s,18) != 0,reachabilityEvidence:Self.optionalText(s,19),lastSuccessfulObservation:Self.optionalDate(s,20))}}
+    func deleteHomeDevice(_ id:UUID)throws{try run("DELETE FROM home_devices WHERE id=?",[.text(id.uuidString)])}
+    func mergeHomeDevices(source:UUID,destination:UUID)throws{guard source != destination else{return};try transaction{try run("INSERT OR IGNORE INTO home_device_addresses(device_id,address,family,last_seen) SELECT ?,address,family,last_seen FROM home_device_addresses WHERE device_id=?",[.text(destination.uuidString),.text(source.uuidString)]);try run("UPDATE home_device_observations SET device_id=? WHERE device_id=?",[.text(destination.uuidString),.text(source.uuidString)]);try run("DELETE FROM home_devices WHERE id=?",[.text(source.uuidString)])}}
+    func homeObservations(deviceID:UUID,since:Date)throws->[HomeDeviceObservation]{try query("SELECT id,timestamp,status,evidence,ip,source FROM home_device_observations WHERE device_id=? AND timestamp>=? ORDER BY timestamp",[.text(deviceID.uuidString),.date(since)]){s in HomeDeviceObservation(id:UUID(uuidString:Self.text(s,0))!,deviceID:deviceID,timestamp:Self.date(s,1),status:HomeDeviceReachability(rawValue:Self.text(s,2)) ?? .unknown,evidence:Self.text(s,3),ip:Self.optionalText(s,4),source:HomeDiscoverySource(rawValue:Self.text(s,5)) ?? .manual)}}
+    private func insertHomeObservation(_ value:HomeDeviceObservation)throws{try run("INSERT OR IGNORE INTO home_device_observations(id,device_id,timestamp,status,evidence,ip,source) VALUES(?,?,?,?,?,?,?)",[.text(value.id.uuidString),.text(value.deviceID.uuidString),.date(value.timestamp),.text(value.status.rawValue),.text(value.evidence),.optional(value.ip),.text(value.source.rawValue)])}
     private func prune(_ table:String,_ nodeID:UUID,_ now:Date)throws{try run("DELETE FROM \(table) WHERE node_id=? AND timestamp<?",[.text(nodeID.uuidString),.real(now.addingTimeInterval(-604_800).timeIntervalSince1970)])}
 
     private static func configure(_ db: OpaquePointer?) throws {
@@ -143,6 +154,20 @@ actor InfrastructureStore {
             do { try exec(db,"CREATE TABLE agent_sync_state(node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,stream TEXT NOT NULL,cursor INTEGER NOT NULL,PRIMARY KEY(node_id,stream)); PRAGMA user_version=4;");try exec(db,"COMMIT") } catch { try? exec(db,"ROLLBACK");throw error }
         }
         if current < 5 { try migrateTelemetryIdentityToV5(db) }
+        if current < 6 {
+            try exec(db,"BEGIN IMMEDIATE")
+            do{try exec(db,"""
+                CREATE TABLE home_networks(id TEXT PRIMARY KEY,name TEXT NOT NULL,cidr TEXT NOT NULL,router_ip TEXT NOT NULL,notes TEXT NOT NULL,created_at REAL NOT NULL,updated_at REAL NOT NULL,is_active INTEGER NOT NULL);
+                CREATE TABLE home_devices(id TEXT PRIMARY KEY,display_name TEXT NOT NULL,hostname TEXT,ipv4 TEXT,ipv6 TEXT,mac_address TEXT,vendor TEXT,type TEXT NOT NULL,custom_type TEXT,status TEXT NOT NULL,last_seen REAL,first_seen REAL NOT NULL,sources TEXT NOT NULL,is_pinned INTEGER NOT NULL,notes TEXT,preferred_url TEXT,preferred_ssh TEXT,name_manual INTEGER NOT NULL,type_manual INTEGER NOT NULL,evidence TEXT,last_success REAL);
+                CREATE UNIQUE INDEX home_device_mac ON home_devices(mac_address) WHERE mac_address IS NOT NULL;
+                CREATE TABLE home_device_addresses(device_id TEXT NOT NULL REFERENCES home_devices(id) ON DELETE CASCADE,address TEXT NOT NULL,family TEXT NOT NULL,last_seen REAL NOT NULL,PRIMARY KEY(device_id,address));
+                CREATE INDEX home_addresses_value ON home_device_addresses(address);
+                CREATE TABLE home_device_observations(id TEXT PRIMARY KEY,device_id TEXT NOT NULL REFERENCES home_devices(id) ON DELETE CASCADE,timestamp REAL NOT NULL,status TEXT NOT NULL,evidence TEXT NOT NULL,ip TEXT,source TEXT NOT NULL);
+                CREATE INDEX home_observation_device_time ON home_device_observations(device_id,timestamp);
+                PRAGMA user_version=6;
+                COMMIT;
+                """) }catch{try? exec(db,"ROLLBACK");throw error}
+        }
     }
 
     private static func migrateTelemetryIdentityToV5(_ db:OpaquePointer?)throws{
@@ -195,6 +220,7 @@ actor InfrastructureStore {
     private static func exec(_ db: OpaquePointer?, _ sql: String) throws { var error: UnsafeMutablePointer<CChar>?; guard sqlite3_exec(db, sql, nil, nil, &error) == SQLITE_OK else { let message = error.map { String(cString: $0) } ?? "SQLite error"; sqlite3_free(error); throw PersistenceError.execute(message) } }
     private static func text(_ statement: OpaquePointer, _ column: Int32) -> String { sqlite3_column_text(statement, column).map { String(cString: $0) } ?? "" }
     private static func optionalText(_ statement: OpaquePointer, _ column: Int32) -> String? { sqlite3_column_type(statement, column) == SQLITE_NULL ? nil : text(statement, column) }
+    private static func optionalDate(_ statement:OpaquePointer,_ column:Int32)->Date?{sqlite3_column_type(statement,column)==SQLITE_NULL ? nil:date(statement,column)}
     private static func date(_ statement: OpaquePointer, _ column: Int32) -> Date { Date(timeIntervalSince1970: sqlite3_column_double(statement, column)) }
 }
 

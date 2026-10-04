@@ -19,7 +19,7 @@ The server boundary is split: `tunneldeck-agent` collects read-only facts as an 
 
 ## Persistence ownership
 
-- Persist: nodes, monitoring samples/events, peer and AdGuard telemetry, alert rules/runtime state, configuration baselines, and Agent sync cursors. Credentials and private keys never enter SQLite.
+- Persist: nodes, monitoring samples/events, peer and AdGuard telemetry, alert rules/runtime state, configuration baselines, Agent sync cursors, and the node-independent Home Network inventory. Credentials and private keys never enter SQLite.
 - Rebuild: incidents from persisted events; baseline drift from the saved baseline plus a fresh observation; Fleet summaries from per-node last-known samples; charts from persisted telemetry.
 - Refresh after wake: system, WireGuard, service, helper, AdGuard, security, exposure, and current Fleet state. Until refreshed, prior observations are stale—not offline.
 - Session-only: in-flight progress, presented errors, raw command results, and helper reachability. Security/exposure facts are deliberately reacquired because old evidence cannot prove current reachability.
@@ -31,6 +31,8 @@ The server boundary is split: `tunneldeck-agent` collects read-only facts as an 
 The 2.0 domain is node-scoped: infrastructure nodes, services, endpoints, WireGuard metadata, monitoring, events, incidents, alerts, baselines, drift and backups carry a stable node UUID. Hosts are mutable connection attributes, not identity.
 
 SQLite is the operational source of truth. Migrations use `PRAGMA user_version`, foreign keys, WAL and transactions. Secrets are excluded; SSH key paths and AdGuard credentials remain in Keychain/existing secure storage. Legacy Monitoring JSON is imported with UUID deduplication and retained during compatibility.
+
+Home Access is deliberately separate from the VPS Fleet. Schema v6 stores confirmed Home Network configuration, stable MAC-first device identities, address changes, and 30-day lightweight observations. Local discovery runs only while its screen is active, uses unprivileged ARP/NDP and routing evidence, and never configures the LAN or scans ports. Imported WireGuard profiles remain files under Application Support with directory mode `0700` and file mode `0600`; their private contents never enter SQLite or logs.
 
 Remote discovery remains read-only. Existing writes still require explicit Write Mode and matching helper 1.2.1. Topology, exposure, drift, incidents and alerts never change VPS configuration.
 

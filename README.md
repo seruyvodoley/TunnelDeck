@@ -1,4 +1,13 @@
-# TunnelDeck 2.1.1
+# TunnelDeck 2.2.0
+
+## TunnelDeck 2.2.0 release notes
+
+- Home Access now provides a persistent Home Devices inventory using local, unprivileged ARP and IPv6 neighbour evidence.
+- Configurable Home LAN identity distinguishes local access, verified VPN routing, other networks and unknown paths without changing the router.
+- Device details support manual names and types, notes, pinning, safe preferred actions, duplicate merging and 30-day presence observations.
+- Remote WireGuard profiles can be imported, renamed, revealed, opened, rendered as a warned QR code and securely deleted; private files remain local with mode `0600`.
+- SQLite schema v6 stores home networks, stable device identities, changing addresses and lightweight observations independently from the VPS Fleet.
+- Router and Topology views link to a separate evidence-based Home LAN summary; unknown devices are never presented as online.
 
 Server deployment keeps three explicit trust boundaries: the app reaches the Agent read API through narrowly scoped `sudo -u tunneldeck-agent`, legacy Helper 1.2.1 remains at its stable path, and transactional Helper 2.0 is installed side-by-side as `tunneldeck-helper2`. The installer provides structured non-mutating preview, validated atomic installation, systemd state restoration and first-install rollback without deleting telemetry by default.
 

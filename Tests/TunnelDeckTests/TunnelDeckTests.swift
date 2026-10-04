@@ -565,7 +565,7 @@ private func makeV4TelemetryFixture(_ url:URL,malformed:Bool=false)throws{
 @Test func sqliteV4ToV5PreservesRowsAndScopesTelemetryIdentity() async throws{
     let root=FileManager.default.temporaryDirectory.appendingPathComponent("TunnelDeckV5-\(UUID())");try FileManager.default.createDirectory(at:root,withIntermediateDirectories:true);defer{try? FileManager.default.removeItem(at:root)}
     let url=root.appendingPathComponent("db.sqlite3");try makeV4TelemetryFixture(url);let store=try InfrastructureStore(url:url)
-    #expect(try await store.schemaVersion()==5)
+    #expect(try await store.schemaVersion()==InfrastructureStore.currentSchemaVersion)
     let a=UUID(uuidString:"00000000-0000-0000-0000-000000000001")!,b=UUID(uuidString:"00000000-0000-0000-0000-000000000002")!,same=UUID(uuidString:"10000000-0000-0000-0000-000000000001")!
     #expect(try await store.sampleCount(nodeID:a)==1)
     let sample=MonitoringSample(nodeID:b,id:same,timestamp:Date(timeIntervalSince1970:2),cpuPercent:4,memoryPercent:5,diskPercent:6,pingMilliseconds:nil,vpsState:.online,wireGuardState:.unknown,adGuardState:.unknown,antiZapretState:.unknown,publicDNSExposed:false,publicListeners:[])
@@ -677,4 +677,64 @@ private actor AgentFixtureSource:AgentHistorySource{
     #expect(legacy.supports("legacy-safe-writes"));#expect(!modern.supports("legacy-safe-writes"));#expect(Helper2CommandPolicy.arguments(for:.info)==["/usr/local/libexec/tunneldeck-helper2","helper-info"])
     #expect(Helper2Service.decodeCapabilities(CommandResult(stdout:"{\"version\":\"2.0.0\",\"protocolVersion\":2,\"capabilities\":[\"transaction-v2\"]}",stderr:"",exitCode:0,duration:0))?.version=="2.0.0")
     #expect(Helper2Service.decodeCapabilities(CommandResult(stdout:"{\"result\":\"failed\"}",stderr:"failed",exitCode:3,duration:0))==nil)
+}
+
+@Test func homeDiscoveryParsesARPAndNDPWithoutMalformedRows(){
+    let arp=HomeDiscoveryParser.arp("? (192.168.50.1) at aa:bb:cc:dd:ee:ff on en0 ifscope [ethernet]\n? (192.168.50.9) at (incomplete) on en0\nmalformed")
+    #expect(arp.count==1);#expect(arp[0].ip=="192.168.50.1");#expect(arp[0].mac=="aa:bb:cc:dd:ee:ff")
+    #expect(HomeDeviceIdentity.normalizedMAC("d6:eb:e0:6a:52:b")=="d6:eb:e0:6a:52:0b")
+    let ndp=HomeDiscoveryParser.ndp("fe80::1%en0 11:22:33:44:55:66 en0 23h59m59s S R\nNeighbor Linklayer Address Netif Expire S Flags")
+    #expect(ndp.count==1);#expect(ndp[0].ip=="fe80::1");#expect(ndp[0].mac=="11:22:33:44:55:66")
+    #expect(HomeDiscoveryParser.arp("").isEmpty);#expect(HomeDiscoveryParser.ndp("garbage").isEmpty)
+}
+
+@Test func homeDeviceIdentityAndRediscoveryPreserveManualMetadata(){
+    let mac="aa:bb:cc:dd:ee:ff",first=HomeDeviceIdentity.stableID(mac:mac,ip:"192.168.1.10",hostname:nil),moved=HomeDeviceIdentity.stableID(mac:mac,ip:"192.168.1.20",hostname:nil)
+    #expect(first==moved)
+    #expect(HomeDeviceIdentity.stableID(mac:"00:11:22:33:44:55",ip:"192.168.1.10",hostname:nil) != HomeDeviceIdentity.stableID(mac:"00:11:22:33:44:66",ip:"192.168.1.10",hostname:nil))
+    let now=Date(),manual=HomeDevice(id:first,displayName:"Kitchen Vacuum",hostname:nil,ipv4:"192.168.1.10",ipv6:nil,macAddress:mac,vendor:nil,type:.vacuum,customType:nil,status:.unknown,lastSeen:nil,firstSeen:now.addingTimeInterval(-300),discoverySources:[.manual],notes:"Upstairs",nameIsManual:true,typeIsManual:true)
+    let merged=HomeDeviceReconciler.merge(existing:manual,record:HomeDiscoveryRecord(ip:"192.168.1.20",mac:mac,hostname:"device.local",source:.arp,evidence:"Fresh ARP neighbour"),now:now)
+    #expect(merged.id==first);#expect(merged.displayName=="Kitchen Vacuum");#expect(merged.type == .vacuum);#expect(merged.ipv4=="192.168.1.20");#expect(merged.lastSeen==now);#expect(merged.status == .online)
+}
+
+@Test func homePresenceUsesConservativeOfflineSemantics(){
+    let now=Date();#expect(HomePresence.status(lastSeen:nil,now:now,homeMode:.homeLAN) == .unknown)
+    #expect(HomePresence.status(lastSeen:now.addingTimeInterval(-60),now:now,homeMode:.other) == .online)
+    #expect(HomePresence.status(lastSeen:now.addingTimeInterval(-3600),now:now,homeMode:.homeLAN) == .unknown)
+    #expect(HomePresence.status(lastSeen:now.addingTimeInterval(-90_000),now:now,homeMode:.homeLAN) == .offline)
+    #expect(HomePresence.status(lastSeen:now.addingTimeInterval(-90_000),now:now,homeMode:.remote) == .unknown)
+}
+
+@Test func homePersistenceMigrationMergeAndPruning()async throws{
+    let root=FileManager.default.temporaryDirectory.appendingPathComponent("HomeStore-\(UUID())");try FileManager.default.createDirectory(at:root,withIntermediateDirectories:true);defer{try? FileManager.default.removeItem(at:root)}
+    let store=try InfrastructureStore(url:root.appendingPathComponent("db.sqlite3"));#expect(try await store.schemaVersion()==6)
+    let now=Date(),a=HomeDevice(displayName:"Manual Name",hostname:nil,ipv4:"192.168.1.10",ipv6:nil,macAddress:"aa:bb:cc:dd:ee:01",vendor:nil,type:.nas,customType:nil,status:.online,lastSeen:now,firstSeen:now,discoverySources:[.manual],nameIsManual:true,typeIsManual:true),b=HomeDevice(displayName:"Duplicate",hostname:nil,ipv4:"192.168.1.11",ipv6:nil,macAddress:"aa:bb:cc:dd:ee:02",vendor:nil,type:.unknown,customType:nil,status:.online,lastSeen:now,firstSeen:now,discoverySources:[.arp])
+    try await store.save(homeDevice:a,observation:HomeDeviceObservation(deviceID:a.id,timestamp:now.addingTimeInterval(-2_700_000),status:.online,evidence:"old",ip:a.ipv4,source:.manual));try await store.save(homeDevice:b,observation:HomeDeviceObservation(deviceID:b.id,timestamp:now,status:.online,evidence:"fresh",ip:b.ipv4,source:.arp))
+    #expect(try await store.homeObservations(deviceID:a.id,since:.distantPast).isEmpty)
+    try await store.mergeHomeDevices(source:b.id,destination:a.id)
+    let devices=try await store.homeDevices(),history=try await store.homeObservations(deviceID:a.id,since:.distantPast)
+    #expect(devices.count==1);#expect(devices[0].displayName=="Manual Name");#expect(history.count==1);#expect(history[0].deviceID==a.id)
+}
+
+@Test func sqliteV5ToV6CreatesHomeInventoryAndSurvivesReopen()async throws{
+    let root=FileManager.default.temporaryDirectory.appendingPathComponent("HomeV6-\(UUID())");try FileManager.default.createDirectory(at:root,withIntermediateDirectories:true);defer{try? FileManager.default.removeItem(at:root)};let url=root.appendingPathComponent("db.sqlite3")
+    var db:OpaquePointer?;#expect(sqlite3_open(url.path,&db)==SQLITE_OK);#expect(sqlite3_exec(db,"PRAGMA user_version=5",nil,nil,nil)==SQLITE_OK);sqlite3_close(db)
+    let deviceID:UUID
+    do{let store=try InfrastructureStore(url:url),device=HomeDevice(displayName:"Persistent",hostname:nil,ipv4:nil,ipv6:nil,macAddress:nil,vendor:nil,type:.unknown,customType:nil,status:.unknown,lastSeen:nil,firstSeen:Date(),discoverySources:[.manual]);deviceID=device.id;#expect(try await store.schemaVersion()==6);try await store.save(homeDevice:device)}
+    let reopened=try InfrastructureStore(url:url),devices=try await reopened.homeDevices();#expect(devices.count==1);#expect(devices[0].id==deviceID)
+}
+
+@Test func homeAccessProfileImportRenameDeleteAndPathSafety()throws{
+    let root=FileManager.default.temporaryDirectory.appendingPathComponent("HomeProfiles-\(UUID())"),source=root.appendingPathComponent("source.conf"),destination=root.appendingPathComponent("profiles");try FileManager.default.createDirectory(at:root,withIntermediateDirectories:true);defer{try? FileManager.default.removeItem(at:root)};try Data("[Interface]\nPrivateKey = fixture-only".utf8).write(to:source)
+    let imported=try ProfileStore.importHomeAccess(from:source,name:"MacBook",directory:destination);#expect(imported.url.lastPathComponent=="MacBook.conf");#expect((try FileManager.default.attributesOfItem(atPath:imported.url.path)[.posixPermissions] as? NSNumber)?.intValue==0o600)
+    let renamed=try ProfileStore.rename(imported,name:"Phone",in:destination);#expect(renamed.url.lastPathComponent=="Phone.conf");#expect(ProfileStore.qrImage(for:"fixture") != nil)
+    #expect(throws:ProfileStore.ProfileError.self){try ProfileStore.rename(renamed,name:"../escape",in:destination)}
+    try ProfileStore.delete(renamed,within:destination);#expect(!FileManager.default.fileExists(atPath:renamed.url.path))
+}
+
+@Test func localDiscoveryProcessLifecycleDoesNotLeak()async throws{
+    let runner=LocalCommandRunner()
+    for _ in 0..<100{_ = try await runner.run("/usr/bin/true",[])}
+    #expect(await runner.activeProcessCount()==0)
+    let task=Task{try await runner.run("/bin/sleep",["5"])};try await Task.sleep(for:.milliseconds(30));task.cancel();_ = try? await task.value;try await Task.sleep(for:.milliseconds(30));#expect(await runner.activeProcessCount()==0)
 }
