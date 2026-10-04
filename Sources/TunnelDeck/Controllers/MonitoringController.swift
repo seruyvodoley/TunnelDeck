@@ -121,6 +121,13 @@ final class NodeOperationGuard {
     func accepts(nodeID: UUID?, generation: Int, activeNodeID: UUID?) -> Bool { self.generation == generation && nodeID == activeNodeID }
 }
 
+struct NodeOperationContext: Sendable {
+    let nodeID: UUID?
+    let generation: Int
+    let configuration: SSHConfiguration
+    let host: String
+}
+
 @MainActor
 final class InFlightOperationState {
     private var token: UUID?
