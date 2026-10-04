@@ -4,6 +4,7 @@ import SwiftUI
 
 @MainActor
 final class AppViewModel: ObservableObject {
+    lazy var home=HomeAccessController(store:persistenceStore)
     @Published var settings: AppSettings
     @Published var system = SystemSnapshot()
     @Published var wireGuard = WireGuardSnapshot()

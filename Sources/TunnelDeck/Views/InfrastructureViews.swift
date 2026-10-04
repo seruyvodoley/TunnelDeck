@@ -385,9 +385,5 @@ struct DiagnosticsView: View {
 struct RouterView: View {
     @EnvironmentObject var model: AppViewModel
     var reachable: Bool { !model.system.macLANIP.isEmpty && model.system.macLANIP != "—" }
-    var body: some View { ScrollView { LazyVGrid(columns: [GridItem(.adaptive(minimum: 340))], spacing: 16) { MetricCard(title: "Home Router", icon: "wifi.router") { VStack(spacing: 10) { HStack { StatusDot(state: reachable ? .online : .offline); Text(reachable ? "LAN detected" : "Not on a LAN"); Spacer() }; KeyValueRow(key: "Current Mac LAN", value: model.system.macLANIP); Text("Open your router admin URL manually. TunnelDeck never stores router credentials or uses private vendor APIs.").foregroundStyle(.secondary) } } }.padding(20) } }
-}
-
-struct HomeAccessView: View {
-    var body: some View { ContentUnavailableView { Label("Remote Home Access", systemImage: "house.and.flag") } description: { Text("Store imported router WireGuard profiles locally for Macs and phones. Router configuration is never changed automatically.") } actions: { Button("Import Local Profile…") {}.disabled(true) } }
+    var body: some View { ScrollView { LazyVGrid(columns: [GridItem(.adaptive(minimum: 340))], spacing: 16) { MetricCard(title: "Home Router", icon: "wifi.router") { VStack(spacing: 10) { HStack { StatusDot(state: model.home.snapshot.mode == .homeLAN ? .online:.unknown); Text(model.home.snapshot.mode.rawValue); Spacer() }; KeyValueRow(key: "Current Mac LAN", value: model.home.snapshot.macLANIP ?? model.system.macLANIP);KeyValueRow(key:"Home network",value:model.home.network?.name ?? "Not configured");KeyValueRow(key:"Router",value:(model.home.network?.routerIP.isEmpty == false ? model.home.network?.routerIP:nil) ?? "Unknown");KeyValueRow(key:"Known devices",value:String(model.home.devices.count));KeyValueRow(key:"Seen now",value:String(model.home.devices.filter{$0.status == .online}.count));Button("View Home Devices"){model.selectedSection = .homeAccess}; Text("TunnelDeck never stores router credentials or uses private vendor APIs.").foregroundStyle(.secondary) } } }.padding(20) } }
 }
