@@ -30,7 +30,7 @@ struct HomeNetworkSnapshot:Sendable,Equatable{
 }
 
 enum HomeDeviceIdentity{
-    static func normalizedMAC(_ value:String?)->String?{guard let value else{return nil};let cleaned=value.lowercased().replacingOccurrences(of:"-",with:":");let parts=cleaned.split(separator:":");guard parts.count==6,parts.allSatisfy({(1...2).contains($0.count) && $0.allSatisfy(\.isHexDigit)})else{return nil};return parts.map{$0.count==1 ? "0\($0)":String($0)}.joined(separator:":")}
+    static func normalizedMAC(_ value:String?)->String?{guard let value else{return nil};let cleaned=value.lowercased().replacingOccurrences(of:"-",with:":");let parts=cleaned.split(separator:":");guard parts.count==6,parts.allSatisfy({(1...2).contains($0.count) && $0.allSatisfy(\.isHexDigit)})else{return nil};let normalized=parts.map{$0.count==1 ? "0\($0)":String($0)}.joined(separator:":");guard normalized != "02:00:00:00:00:00",normalized != "00:00:00:00:00:00" else{return nil};return normalized}
     static func stableID(mac:String?,manualID:UUID?=nil,ip:String?,hostname:String?)->UUID{
         if let manualID{return manualID};let key=normalizedMAC(mac).map{"mac|\($0)"} ?? "fallback|\(hostname?.lowercased() ?? "")|\(ip ?? "")";var bytes=[UInt8](repeating:0,count:16);for(index,byte)in key.utf8.enumerated(){bytes[index%16]=bytes[index%16]&*31&+byte};return UUID(uuid:(bytes[0],bytes[1],bytes[2],bytes[3],bytes[4],bytes[5],bytes[6],bytes[7],bytes[8],bytes[9],bytes[10],bytes[11],bytes[12],bytes[13],bytes[14],bytes[15]))
     }

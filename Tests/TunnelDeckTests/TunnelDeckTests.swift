@@ -683,6 +683,7 @@ private actor AgentFixtureSource:AgentHistorySource{
     let arp=HomeDiscoveryParser.arp("? (192.168.50.1) at aa:bb:cc:dd:ee:ff on en0 ifscope [ethernet]\n? (192.168.50.9) at (incomplete) on en0\nmalformed")
     #expect(arp.count==1);#expect(arp[0].ip=="192.168.50.1");#expect(arp[0].mac=="aa:bb:cc:dd:ee:ff")
     #expect(HomeDeviceIdentity.normalizedMAC("d6:eb:e0:6a:52:b")=="d6:eb:e0:6a:52:0b")
+    #expect(HomeDeviceIdentity.normalizedMAC("02:00:00:00:00:00")==nil)
     let ndp=HomeDiscoveryParser.ndp("fe80::1%en0 11:22:33:44:55:66 en0 23h59m59s S R\nNeighbor Linklayer Address Netif Expire S Flags")
     #expect(ndp.count==1);#expect(ndp[0].ip=="fe80::1");#expect(ndp[0].mac=="11:22:33:44:55:66")
     #expect(HomeDiscoveryParser.arp("").isEmpty);#expect(HomeDiscoveryParser.ndp("garbage").isEmpty)
