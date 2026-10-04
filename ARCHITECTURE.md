@@ -1,5 +1,16 @@
 # TunnelDeck Architecture
 
+## Server component topology
+
+```text
+TunnelDeck.app
+   ├─ sudo -n -u tunneldeck-agent → tunneldeck-agent (read-only telemetry)
+   ├─ tunneldeck-helper 1.2.1      stable legacy operations
+   └─ tunneldeck-helper2 2.0       new transactional remediation
+```
+
+`HelperService` talks only to the legacy path. `Helper2Service`, owned by `RemediationController`, talks only to the side-by-side protocol-2 path. Their capabilities and response models are separate, so a missing Helper 2 cannot disable established 1.2.1 behavior.
+
 ## Wake and server telemetry flow
 
 Local SQLite is the macOS operational source of truth. Sleep stops the single polling coordinator without recording an outage. Wake reloads local history, attempts an incremental Agent 2.0 cursor sync, reloads merged history, refreshes the selected node, and restarts exactly one polling loop.

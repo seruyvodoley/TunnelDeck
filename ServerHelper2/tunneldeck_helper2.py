@@ -11,17 +11,23 @@ import shutil
 import subprocess
 import tempfile
 import uuid
+import sys
 from pathlib import Path
 
 VERSION = "2.0.0"
 PROTOCOL_VERSION = 2
 CAPABILITIES = ["transaction-v2", "service-actions", "verified-manifest", "ssh-preview", "firewall-preview"]
+EXIT_REJECTED = 2
+EXIT_RUNTIME_FAILURE = 3
+EXIT_ROLLBACK_FAILURE = 4
 ALLOWED_UNITS = {"wg-quick@wg0.service", "AdGuardHome.service", "antizapret.service", "wg-quick@antizapret.service", "wg-quick@vpn.service", "openvpn-server@antizapret-udp.service", "openvpn-server@vpn-udp.service"}
 NAME_RE = re.compile(r"^[A-Za-z0-9_.@-]{1,80}$")
 INTERFACE_RE = re.compile(r"^[A-Za-z0-9_.-]{1,15}$")
 
 
 class HelperError(RuntimeError): pass
+class ProtocolArgumentParser(argparse.ArgumentParser):
+    def error(self, message): raise HelperError(message)
 
 
 def validate_unit(value):
@@ -106,10 +112,13 @@ def verify_manifest(root, identifier):
 
 
 def helper_info(): return {"version": VERSION, "protocolVersion": PROTOCOL_VERSION, "capabilities": CAPABILITIES}
+def exit_code(output):
+    if output.get("result") != "failed": return 0
+    return EXIT_ROLLBACK_FAILURE if output.get("rollbackStatus") == "failed" else EXIT_RUNTIME_FAILURE
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(); sub = parser.add_subparsers(dest="command", required=True)
+    parser = ProtocolArgumentParser(); sub = parser.add_subparsers(dest="command", required=True, parser_class=ProtocolArgumentParser)
     sub.add_parser("helper-info")
     service = sub.add_parser("service"); service.add_argument("service_action", choices=["start", "stop", "restart"]); service.add_argument("unit"); service.add_argument("--apply", action="store_true")
     ssh = sub.add_parser("ssh-hardening"); ssh.add_argument("--apply", action="store_true")
@@ -120,10 +129,13 @@ def main(argv=None):
     else:
         if args.apply: raise HelperError("apply adapter not installed; preview-only safety boundary")
         output = {"protocolVersion": PROTOCOL_VERSION, "operationID": str(uuid.uuid4()), "operation": args.command, "preview": True, "backup": None, "changedFiles": [], "preChecks": ["independent-access-required"], "postChecks": [], "result": "preview", "rollbackStatus": "not-required", "warnings": ["Deployment adapter intentionally absent"]}
-    print(json.dumps(output, separators=(",", ":"), sort_keys=True)); return 0
+    print(json.dumps(output, separators=(",", ":"), sort_keys=True))
+    return exit_code(output)
 
 
 if __name__ == "__main__":
     try: raise SystemExit(main())
     except HelperError as error:
-        print(json.dumps({"protocolVersion": PROTOCOL_VERSION, "result": "rejected", "error": str(error)})); raise SystemExit(2)
+        print(json.dumps({"protocolVersion": PROTOCOL_VERSION, "result": "rejected", "error": str(error)}))
+        print(str(error), file=sys.stderr)
+        raise SystemExit(EXIT_REJECTED)

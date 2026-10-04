@@ -1,0 +1,4 @@
+# Exact privileged read-only evidence commands used by the unprivileged collector.
+tunneldeck-agent ALL=(root) NOPASSWD: /usr/bin/wg show all dump
+tunneldeck-agent ALL=(root) NOPASSWD: /usr/sbin/nft list ruleset
+tunneldeck-agent ALL=(root) NOPASSWD: /usr/bin/sha256sum /opt/AdGuardHome/AdGuardHome.yaml

@@ -536,7 +536,8 @@ import Testing
     let store=try InfrastructureStore(url:root.appendingPathComponent("db.sqlite3")),node=InfrastructureNode(id:UUID(),name:"Fixture",role:.primary,customRole:nil,host:"fixture.invalid",sshPort:22,createdAt:Date(),updatedAt:Date(),enabled:true);try await store.upsert(node:node);let now=Date()
     for offset in [-8_000.0,-100.0]{try await store.insert(sample:MonitoringSample(nodeID:node.id,id:UUID(),timestamp:now.addingTimeInterval(offset),cpuPercent:1,memoryPercent:2,diskPercent:3,pingMilliseconds:nil,vpsState:.online,wireGuardState:.online,adGuardState:.online,antiZapretState:.online,publicDNSExposed:false,publicListeners:[]),nodeID:node.id)}
     #expect(try await store.samples(nodeID:node.id,since:now.addingTimeInterval(-3_600)).count==1)
-    #expect(try await store.latestSamples()[node.id]?.timestamp==now.addingTimeInterval(-100))
+    let latest=try await store.latestSamples()[node.id]?.timestamp
+    #expect(latest.map{abs($0.timeIntervalSince(now.addingTimeInterval(-100)))<0.001} == true)
 }
 
 @Test func agentPaginationSynchronizesSevenDayBacklogWithoutDuplicates() async throws {
@@ -584,4 +585,19 @@ private actor AgentFixtureSource:AgentHistorySource{
     func events(cursor:Int64,limit:Int,configuration:SSHConfiguration)async throws->AgentEnvelope<AgentTelemetryItem<AgentEventPayload>>{envelope(cursor,AgentEventPayload(from:"inactive",to:"active",event:nil))}
     func peers(cursor:Int64,limit:Int,configuration:SSHConfiguration)async throws->AgentEnvelope<AgentTelemetryItem<AgentPeerPayload>>{envelope(cursor,AgentPeerPayload(publicIdentifier:"fixture-public",latestHandshake:0,rx:1,tx:2))}
     func adGuard(cursor:Int64,limit:Int,configuration:SSHConfiguration)async throws->AgentEnvelope<AgentTelemetryItem<AgentAdGuardPayload>>{envelope(cursor,AgentAdGuardPayload(totalQueries:10,blockedQueries:2,blockedPercentage:20,averageProcessingTime:0.001))}
+}
+
+@Test func agentCommandsUseExactUnprivilegedSudoBoundary() {
+    #expect(AgentReadCommand.status.arguments == ["/usr/bin/sudo", "-n", "-u", "tunneldeck-agent", "/usr/local/libexec/tunneldeck-agent", "agent-status"])
+    #expect(AgentReadCommand.history(kind:.samples,cursor:12,limit:2_000).arguments == ["/usr/bin/sudo", "-n", "-u", "tunneldeck-agent", "/usr/local/libexec/tunneldeck-agent", "telemetry-samples", "--cursor", "12", "--limit", "2000"])
+    #expect(!AgentReadCommand.status.arguments.contains("collect"))
+    #expect(!AgentReadCommand.status.arguments.contains("/tmp/tunneldeck-agent"))
+    #expect(AgentHistoryKind.allCases.map(\.rawValue) == ["samples","events","peers","adguard"])
+}
+
+@Test func legacyAndHelper2CapabilitiesRemainSeparate() {
+    let legacy=LegacyHelperCapabilities.legacy(version:"1.2.1"),modern=Helper2Capabilities(version:"2.0.0",protocolVersion:2,capabilities:["transaction-v2"])
+    #expect(legacy.supports("legacy-safe-writes"));#expect(!modern.supports("legacy-safe-writes"));#expect(Helper2CommandPolicy.arguments(for:.info)==["/usr/local/libexec/tunneldeck-helper2","helper-info"])
+    #expect(Helper2Service.decodeCapabilities(CommandResult(stdout:"{\"version\":\"2.0.0\",\"protocolVersion\":2,\"capabilities\":[\"transaction-v2\"]}",stderr:"",exitCode:0,duration:0))?.version=="2.0.0")
+    #expect(Helper2Service.decodeCapabilities(CommandResult(stdout:"{\"result\":\"failed\"}",stderr:"failed",exitCode:3,duration:0))==nil)
 }

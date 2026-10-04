@@ -48,13 +48,20 @@ struct SettingsView: View {
                 HStack { Button("Test SSH") { Task { _ = await model.testSSH() } }; Text(model.statusMessage).foregroundStyle(.secondary) }
             }
             Section("Servers") {
+                TextField("Server Name",text:$state.serverName)
+                TextField("Role",text:$state.serverRole)
                 if !model.servers.isEmpty {
                     Picker("Active VPS", selection: Binding(get: { model.activeServerID }, set: { if let id = $0 { model.selectServer(id) } })) {
                         Text("Select server").tag(UUID?.none)
                         ForEach(model.servers) { server in Text("\(server.name) · \(server.role)").tag(Optional(server.id)) }
                     }
                 }
-                Button("Save Current as Primary VPS") { model.saveCurrentServer() }.disabled(model.settings.host.isEmpty)
+                HStack {
+                    Button("Update Current Server") { model.saveCurrentServer(name:state.serverName,role:state.serverRole) }
+                        .disabled(model.activeServerID == nil || !state.valid || model.settings.host.isEmpty)
+                    Button("Add New Server") { model.saveNewServer(name:state.serverName,role:state.serverRole) }
+                        .disabled(!state.valid || model.settings.host.isEmpty)
+                }
                 Text("Servers are stored separately. TunnelDeck never copies or migrates configuration between VPS instances.").foregroundStyle(.secondary)
             }
             Section("Polling") {
@@ -68,8 +75,10 @@ struct SettingsView: View {
                     if enabled { state.confirmWriteMode = true } else { model.settings.writeModeEnabled = false; model.saveSettings() }
                 }))
                 Text("Write Mode only permits validated TunnelDeck helper subcommands. Automatic backups are required before configuration changes.").foregroundStyle(.secondary)
-                if let version = model.helperVersion { KeyValueRow(key: "Server helper", value: version) }
-                else { Label("Server helper unavailable", systemImage: "exclamationmark.triangle").foregroundStyle(.orange) }
+                if let version = model.helperVersion { KeyValueRow(key: "Legacy Helper", value: "\(version) · Ready") }
+                else { Label("Legacy Helper unavailable", systemImage: "exclamationmark.triangle").foregroundStyle(.orange) }
+                if let helper2 = model.helper2Capabilities { KeyValueRow(key: "Helper 2", value: "\(helper2.version) · Ready") }
+                else { KeyValueRow(key: "Helper 2", value: "Not installed") }
             }
             Section("System") {
                 Toggle("Launch at Login", isOn: Binding(get: { model.settings.launchAtLogin }, set: { value in
@@ -92,6 +101,8 @@ struct SettingsView: View {
             #endif
             Button("Save") { model.saveSettings() }
         }.formStyle(.grouped).padding()
+            .onAppear{state.reflect(server:model.servers.first{$0.id==model.activeServerID})}
+            .onChange(of:model.activeServerID){_,id in state.reflect(server:model.servers.first{$0.id==id})}
             .alert("Enable Write Mode?", isPresented: $state.confirmWriteMode) {
                 Button("Cancel", role: .cancel) {}
                 Button("Enable", role: .destructive) { model.settings.writeModeEnabled = true; model.saveSettings() }
@@ -102,7 +113,13 @@ struct SettingsView: View {
 }
 
 @MainActor
-private final class SettingsScreenState: ObservableObject { @Published var confirmWriteMode = false }
+private final class SettingsScreenState: ObservableObject {
+    @Published var confirmWriteMode=false
+    @Published var serverName="Primary VPS"
+    @Published var serverRole="Primary"
+    var valid:Bool{!serverName.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty && !serverRole.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty}
+    func reflect(server:ServerProfile?){guard let server else{return};serverName=server.name;serverRole=server.role}
+}
 
 struct OnboardingView: View {
     @EnvironmentObject var model: AppViewModel

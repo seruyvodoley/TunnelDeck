@@ -36,6 +36,11 @@ actor SSHService {
         return try await run(command: command.arguments.map(Self.shellQuote).joined(separator: " "), configuration: configuration, redact: true)
     }
 
+    func executeHelper2(_ command: Helper2Command, configuration: SSHConfiguration) async throws -> CommandResult {
+        try CommandPolicy.validate(host: configuration.host, username: configuration.username, keyPath: configuration.keyPath)
+        return try await run(command: Helper2CommandPolicy.arguments(for: command).map(Self.shellQuote).joined(separator: " "), configuration: configuration, redact: true)
+    }
+
     func fetchClientConfig(name: String, configuration: SSHConfiguration) async throws -> String {
         let arguments = try WriteCommandPolicy.arguments(for: .clientConfig(name: name))
         let result = try await run(command: arguments.map(Self.shellQuote).joined(separator: " "), configuration: configuration, redact: false)

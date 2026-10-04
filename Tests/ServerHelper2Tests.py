@@ -23,6 +23,7 @@ class Helper2Tests(unittest.TestCase):
         self.assertEqual(helper.helper_info()["protocolVersion"], 2); self.assertIn("transaction-v2", helper.helper_info()["capabilities"])
         self.assertEqual(helper.validate_unit("AdGuardHome.service"), "AdGuardHome.service")
         with self.assertRaises(helper.HelperError): helper.validate_unit("ssh.service")
+        with self.assertRaises(helper.HelperError): helper.main(["service", "invalid", "AdGuardHome.service"])
 
     def test_path_traversal(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -36,6 +37,13 @@ class Helper2Tests(unittest.TestCase):
         adapter = Adapter(); adapter.postcheck = lambda request: (_ for _ in ()).throw(helper.HelperError("failed"))
         result = helper.TransactionEngine("fixture", adapter).run({}, True)
         self.assertEqual(result["rollbackStatus"], "success"); self.assertTrue(adapter.rolled_back)
+        self.assertEqual(helper.exit_code(result), helper.EXIT_RUNTIME_FAILURE)
+
+    def test_rollback_failure_has_distinct_nonzero_exit(self):
+        adapter = Adapter(); adapter.apply = lambda request: (_ for _ in ()).throw(helper.HelperError("apply failed")); adapter.rollback = lambda backup: (_ for _ in ()).throw(helper.HelperError("rollback failed"))
+        result = helper.TransactionEngine("fixture", adapter).run({}, True)
+        self.assertEqual(result["rollbackStatus"], "failed")
+        self.assertEqual(helper.exit_code(result), helper.EXIT_ROLLBACK_FAILURE)
 
     def test_ssh_and_firewall_are_preview_only(self):
         self.assertEqual(helper.main(["ssh-hardening"]), 0); self.assertEqual(helper.main(["firewall-rule"]), 0)
