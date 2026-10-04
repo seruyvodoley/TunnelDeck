@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @testable import TunnelDeck
+import CSQLite
 
 @Test func sshOutputParsing() {
     let result = CommandResult(stdout: "one\r\ntwo\n", stderr: "", exitCode: 0, duration: 0.1)
@@ -540,6 +541,65 @@ import Testing
     #expect(latest.map{abs($0.timeIntervalSince(now.addingTimeInterval(-100)))<0.001} == true)
 }
 
+private func sqliteExec(_ path:String,_ sql:String)throws{
+    var db:OpaquePointer?;guard sqlite3_open(path,&db)==SQLITE_OK else{throw NSError(domain:"SQLiteFixture",code:1)};defer{sqlite3_close(db)}
+    var message:UnsafeMutablePointer<CChar>?;let status=sqlite3_exec(db,sql,nil,nil,&message);if status != SQLITE_OK{let detail=message.map{String(cString:$0)} ?? "SQLite error";sqlite3_free(message);throw NSError(domain:"SQLiteFixture",code:Int(status),userInfo:[NSLocalizedDescriptionKey:detail])}
+}
+
+private func makeV4TelemetryFixture(_ url:URL,malformed:Bool=false)throws{
+    let sampleTail=malformed ? "" : ",public_listeners TEXT NOT NULL"
+    try sqliteExec(url.path,"""
+    PRAGMA foreign_keys=ON;
+    CREATE TABLE nodes(id TEXT PRIMARY KEY,name TEXT NOT NULL,role TEXT NOT NULL,custom_role TEXT,host TEXT NOT NULL,ssh_port INTEGER NOT NULL,created_at REAL NOT NULL,updated_at REAL NOT NULL,enabled INTEGER NOT NULL);
+    INSERT INTO nodes VALUES('00000000-0000-0000-0000-000000000001','A','primary',NULL,'a.invalid',22,0,0,1);
+    INSERT INTO nodes VALUES('00000000-0000-0000-0000-000000000002','B','custom',NULL,'b.invalid',22,0,0,1);
+    CREATE TABLE monitoring_samples(id TEXT PRIMARY KEY,node_id TEXT NOT NULL REFERENCES nodes(id),timestamp REAL NOT NULL,cpu REAL NOT NULL,memory REAL NOT NULL,disk REAL NOT NULL,ping REAL,vps_state TEXT NOT NULL,wg_state TEXT NOT NULL,adguard_state TEXT NOT NULL,antizapret_state TEXT NOT NULL,public_dns INTEGER NOT NULL\(sampleTail));
+    INSERT INTO monitoring_samples VALUES('10000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000001',1,1,2,3,NULL,'online','online','unknown','unknown',0\(malformed ? "" : ",'[]'"));
+    CREATE TABLE infrastructure_events(id TEXT PRIMARY KEY,node_id TEXT NOT NULL REFERENCES nodes(id),timestamp REAL NOT NULL,component_id TEXT NOT NULL,kind TEXT NOT NULL,title TEXT NOT NULL,detail TEXT NOT NULL,state TEXT NOT NULL,is_recovery INTEGER NOT NULL);
+    CREATE TABLE peer_history(id TEXT PRIMARY KEY,node_id TEXT NOT NULL REFERENCES nodes(id),timestamp REAL NOT NULL,peer_id TEXT NOT NULL,name TEXT NOT NULL,vpn_ip TEXT NOT NULL,state TEXT NOT NULL,rx INTEGER NOT NULL,tx INTEGER NOT NULL,latest_handshake REAL);
+    CREATE TABLE adguard_history(id TEXT PRIMARY KEY,node_id TEXT NOT NULL REFERENCES nodes(id),timestamp REAL NOT NULL,total_queries INTEGER NOT NULL,blocked_queries INTEGER NOT NULL,blocked_percentage REAL NOT NULL,average_processing_time REAL NOT NULL);
+    PRAGMA user_version=4;
+    """)
+}
+
+@Test func sqliteV4ToV5PreservesRowsAndScopesTelemetryIdentity() async throws{
+    let root=FileManager.default.temporaryDirectory.appendingPathComponent("TunnelDeckV5-\(UUID())");try FileManager.default.createDirectory(at:root,withIntermediateDirectories:true);defer{try? FileManager.default.removeItem(at:root)}
+    let url=root.appendingPathComponent("db.sqlite3");try makeV4TelemetryFixture(url);let store=try InfrastructureStore(url:url)
+    #expect(try await store.schemaVersion()==5)
+    let a=UUID(uuidString:"00000000-0000-0000-0000-000000000001")!,b=UUID(uuidString:"00000000-0000-0000-0000-000000000002")!,same=UUID(uuidString:"10000000-0000-0000-0000-000000000001")!
+    #expect(try await store.sampleCount(nodeID:a)==1)
+    let sample=MonitoringSample(nodeID:b,id:same,timestamp:Date(timeIntervalSince1970:2),cpuPercent:4,memoryPercent:5,diskPercent:6,pingMilliseconds:nil,vpsState:.online,wireGuardState:.unknown,adGuardState:.unknown,antiZapretState:.unknown,publicDNSExposed:false,publicListeners:[])
+    try await store.insert(sample:sample,nodeID:b);try await store.insert(sample:sample,nodeID:b)
+    #expect(try await store.sampleCount(nodeID:a)==1);#expect(try await store.sampleCount(nodeID:b)==1)
+}
+
+@Test func sqliteV5MigrationRollsBackOnCopyFailure()throws{
+    let root=FileManager.default.temporaryDirectory.appendingPathComponent("TunnelDeckV5Rollback-\(UUID())");try FileManager.default.createDirectory(at:root,withIntermediateDirectories:true);defer{try? FileManager.default.removeItem(at:root)}
+    let url=root.appendingPathComponent("db.sqlite3");try makeV4TelemetryFixture(url,malformed:true);#expect(throws:Error.self){_ = try InfrastructureStore(url:url)}
+    var db:OpaquePointer?;#expect(sqlite3_open(url.path,&db)==SQLITE_OK);defer{sqlite3_close(db)};var version:Int32=0,rowCount:Int32=0
+    var statement:OpaquePointer?;sqlite3_prepare_v2(db,"PRAGMA user_version",-1,&statement,nil);if sqlite3_step(statement)==SQLITE_ROW{version=sqlite3_column_int(statement,0)};sqlite3_finalize(statement)
+    sqlite3_prepare_v2(db,"SELECT count(*) FROM monitoring_samples",-1,&statement,nil);if sqlite3_step(statement)==SQLITE_ROW{rowCount=sqlite3_column_int(statement,0)};sqlite3_finalize(statement)
+    #expect(version==4);#expect(rowCount==1)
+}
+
+@MainActor @Test func rapidNodeSwitchGuardRejectsEveryStaleOperation(){
+    let guardrail=NodeOperationGuard(),a=UUID(),b=UUID();var stale:[(UUID?,Int)]=[]
+    for index in 0..<100{stale.append(guardrail.capture(nodeID:index.isMultiple(of:2) ? a:b));guardrail.advance()}
+    for context in stale{#expect(!guardrail.accepts(nodeID:context.0,generation:context.1,activeNodeID:a));#expect(!guardrail.accepts(nodeID:context.0,generation:context.1,activeNodeID:b))}
+}
+
+@Test func malformedLookingProfileMetadataIsDisplayOnly()throws{
+    let profile=ServerProfile(name:"22",host:"fixture.invalid",port:22,username:"fixture",keyPath:"",role:"/fake/path/to/key"),data=try JSONEncoder().encode(profile),decoded=try JSONDecoder().decode(ServerProfile.self,from:data)
+    #expect(decoded.id==profile.id);#expect(decoded.host=="fixture.invalid");#expect(decoded.port==22);#expect(decoded.role=="/fake/path/to/key")
+}
+
+@Test func completedSSHProcessesAreReleased()async throws{
+    let service=SSHService(),configuration=SSHConfiguration(host:"127.0.0.1",username:"fixture",keyPath:"",timeout:1,port:1)
+    for _ in 0..<20{_ = try? await service.execute(.hostname,configuration:configuration)}
+    try await Task.sleep(for:.milliseconds(50))
+    #expect(await service.activeProcessCount()==0)
+}
+
 @Test func agentPaginationSynchronizesSevenDayBacklogWithoutDuplicates() async throws {
     let total=10_080,pageSize=2_000;var persisted=Set<Int>(),checkpoints:[Int64]=[]
     let result=try await AgentSyncController().paginate(initialCursor:0,safety:AgentPaginationSafety(pageSize:pageSize,maxPages:16,maxRecords:25_000),fetch:{cursor,limit in let start=Int(cursor),end=min(total,start+limit);return AgentPage(items:start<end ? Array((start+1)...end):[],nextCursor:Int64(end))},persist:{items in persisted.formUnion(items)},checkpoint:{checkpoints.append($0)})
@@ -574,6 +634,23 @@ import Testing
     let node=InfrastructureNode(id:UUID(),name:"Fixture",role:.primary,customRole:nil,host:"fixture.invalid",sshPort:22,createdAt:Date(),updatedAt:Date(),enabled:true),store=try InfrastructureStore(url:folder.appendingPathComponent("db.sqlite3"));try await store.upsert(node:node)
     let result=try await AgentSyncController().synchronize(nodeID:node.id,cursors:AgentSyncCursors(),service:AgentFixtureSource(),configuration:SSHConfiguration(host:"fixture.invalid",username:"fixture",keyPath:"",timeout:1),store:store)
     #expect(result.cursors == AgentSyncCursors(samples:1,events:1,peers:1,adGuard:1));#expect(try await store.agentSyncCursors(nodeID:node.id)==result.cursors);#expect(try await store.sampleCount(nodeID:node.id)==1);#expect(try await store.eventCount(nodeID:node.id)==1);#expect(try await store.peerHistory(nodeID:node.id).count==1);#expect(try await store.adGuardHistory(nodeID:node.id).count==1)
+}
+
+@Test func sameAgentIdentityPersistsForTwoNodesAndReplayIsIdempotent()async throws{
+    let folder=FileManager.default.temporaryDirectory.appendingPathComponent("AgentNodeScope-\(UUID())");try FileManager.default.createDirectory(at:folder,withIntermediateDirectories:true);defer{try? FileManager.default.removeItem(at:folder)}
+    let store=try InfrastructureStore(url:folder.appendingPathComponent("db.sqlite3")),a=InfrastructureNode(id:UUID(),name:"A",role:.primary,customRole:nil,host:"a.invalid",sshPort:22,createdAt:Date(),updatedAt:Date(),enabled:true),b=InfrastructureNode(id:UUID(),name:"B",role:.custom,customRole:"Test",host:"b.invalid",sshPort:22,createdAt:Date(),updatedAt:Date(),enabled:true)
+    try await store.upsert(node:a);try await store.upsert(node:b);let controller=AgentSyncController(),source=AgentFixtureSource(),configuration=SSHConfiguration(host:"fixture.invalid",username:"fixture",keyPath:"",timeout:1)
+    _=try await controller.synchronize(nodeID:a.id,cursors:AgentSyncCursors(),service:source,configuration:configuration,store:store)
+    _=try await controller.synchronize(nodeID:b.id,cursors:AgentSyncCursors(),service:source,configuration:configuration,store:store)
+    _=try await controller.synchronize(nodeID:a.id,cursors:AgentSyncCursors(),service:source,configuration:configuration,store:store)
+    #expect(try await store.sampleCount(nodeID:a.id)==1);#expect(try await store.sampleCount(nodeID:b.id)==1);#expect(try await store.eventCount(nodeID:a.id)==1);#expect(try await store.eventCount(nodeID:b.id)==1)
+    #expect(try await store.peerHistory(nodeID:a.id).count==1);#expect(try await store.peerHistory(nodeID:b.id).count==1);#expect(try await store.adGuardHistory(nodeID:a.id).count==1);#expect(try await store.adGuardHistory(nodeID:b.id).count==1)
+}
+
+@Test func atomicAgentPageDoesNotAdvanceAfterFailedCommit()async{
+    var durableCursor:Int64=0,attempts=0
+    await #expect(throws:PaginationFixtureError.self){try await AgentSyncController().paginateAtomic(initialCursor:durableCursor,fetch:{cursor,_ in AgentPage(items:[1,2],nextCursor:cursor+2)},commit:{_,cursor in attempts += 1;if attempts==1{throw PaginationFixtureError.failed};durableCursor=cursor})}
+    #expect(durableCursor==0)
 }
 
 private enum PaginationFixtureError:Error{case failed}
