@@ -99,6 +99,16 @@ TunnelDeck does **not** create or replace the WireGuard server. It manages peers
 
 ## Install
 
+### Keep one installed copy on macOS
+
+For normal updates, keep a single checkout of this repository on `main` and run:
+
+```bash
+bash Scripts/update-install-macos.sh
+```
+
+The script fast-forwards `main`, builds the current Release executable, replaces `~/Applications/TunnelDeck.app`, removes the old repository-local `dist/TunnelDeck.app` build artifact, ad-hoc signs the bundle, and opens the updated app. It refuses to overwrite a source tree that has uncommitted changes.
+
 ### Build in Xcode
 
 ```bash
