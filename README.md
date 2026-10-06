@@ -1,6 +1,11 @@
-# TunnelDeck 2.2.0
+# TunnelDeck 2.2.1
 
-## TunnelDeck 2.2.0 release notes
+## TunnelDeck 2.2.1 release notes
+
+- Home Devices now uses an authenticated, read-only TP-Link Archer AX18 client inventory as its primary source, with DHCP, ARP and NDP reconciliation.
+- Safe active neighbour warm-up fills gaps in the Mac's passive ARP cache while on a confirmed Home LAN.
+- Router credentials remain in macOS Keychain; router sessions stay in memory and all router write actions are rejected before transport.
+- Corrected default-gateway suggestions and added discovery diagnostics without exporting private device inventory.
 
 - Home Access now provides a persistent Home Devices inventory using local, unprivileged ARP and IPv6 neighbour evidence.
 - Configurable Home LAN identity distinguishes local access, verified VPN routing, other networks and unknown paths without changing the router.
