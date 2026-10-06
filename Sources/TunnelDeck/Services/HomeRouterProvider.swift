@@ -289,7 +289,7 @@ actor TPLinkArcherAX18Provider: RouterClientInventoryProvider {
         }
 
         let tail = value[range.upperBound...]
-        let cookie = tail.prefix { $0 != ";" && $0 != "," }.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cookie = String(tail.prefix { $0 != ";" && $0 != "," }).trimmingCharacters(in: .whitespacesAndNewlines)
         return cookie.isEmpty ? nil : cookie
     }
 
