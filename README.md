@@ -3,6 +3,7 @@
 ## TunnelDeck 2.2.2 release notes
 
 - Fixed TP-Link SG L1 S2 authentication: PKCS#1 v1.5 password encryption, OAEP login signatures, confirm=true, sysauth cookies and HMAC-SHA256 authenticated reads.
+- Incidents rendering now uses stable identities, lazy cards and bounded timelines to avoid UI stalls during frequent refreshes.
 - Home Devices now uses an authenticated, read-only TP-Link Archer AX18 client inventory as its primary source, with DHCP, ARP and NDP reconciliation.
 - Safe active neighbour warm-up fills gaps in the Mac's passive ARP cache while on a confirmed Home LAN.
 - Router credentials remain in macOS Keychain; router sessions stay in memory and all router write actions are rejected before transport.
