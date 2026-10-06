@@ -740,6 +740,22 @@ private actor AgentFixtureSource:AgentHistorySource{
     #expect(!TPLinkArcherAX18Provider.allowed(path:"/admin/dhcps?form=client",parameters:["operation":"load","extra":"1"]))
 }
 
+@Test func tpLinkSGStage2UsesAdminForBlankUsernameAndConfirmLoginPayload(){
+    #expect(TPLinkArcherAX18Provider.effectiveUsername(nil)=="admin")
+    #expect(TPLinkArcherAX18Provider.effectiveUsername("")=="admin")
+    #expect(TPLinkArcherAX18Provider.effectiveUsername("   ")=="admin")
+    #expect(TPLinkArcherAX18Provider.effectiveUsername("operator")=="operator")
+    #expect(TPLinkArcherAX18Provider.loginPayload(encryptedPassword:"deadbeef")=="operation=login&password=deadbeef&confirm=true")
+}
+
+@Test func tpLinkSGStage2ExtractsSysauthCookieCaseInsensitively(){
+    #expect(TPLinkArcherAX18Provider.sysauthCookie(from:["Set-Cookie":"sysauth=abc123; Path=/; HttpOnly"])=="abc123")
+    #expect(TPLinkArcherAX18Provider.sysauthCookie(from:["set-cookie":"foo=1; sysauth=xyz789; Path=/"])=="xyz789")
+    #expect(TPLinkArcherAX18Provider.sysauthCookie(from:["Set-Cookie":"foo=1; Path=/"])==nil)
+    let response=RouterHTTPResponse(data:Data(),headers:["SET-COOKIE":"sysauth=value"])
+    #expect(response.header("Set-Cookie")=="sysauth=value")
+}
+
 @Test func tpLinkInventoryNormalizesAndDeduplicatesSanitizedFixtures(){
     let active:[String:Any]=["clients":[
         ["mac":"02:11:22:33:44:55","ip":"192.0.2.10","hostname":"fixture-phone","device_tag":"5g","device_name":"Phone"],
