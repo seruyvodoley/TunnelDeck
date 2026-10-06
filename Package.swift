@@ -7,7 +7,8 @@ let package = Package(
     products: [.executable(name: "TunnelDeck", targets: ["TunnelDeck"])],
     targets: [
         .systemLibrary(name: "CSQLite", path: "Sources/CSQLite"),
-        .executableTarget(name: "TunnelDeck", dependencies: ["CSQLite"], exclude: ["Resources/Info.plist"]),
+        .systemLibrary(name: "CCommonCrypto", path: "Sources/CCommonCrypto"),
+        .executableTarget(name: "TunnelDeck", dependencies: ["CSQLite", "CCommonCrypto"], exclude: ["Resources/Info.plist"]),
         .testTarget(name: "TunnelDeckTests", dependencies: ["TunnelDeck"])
     ]
 )

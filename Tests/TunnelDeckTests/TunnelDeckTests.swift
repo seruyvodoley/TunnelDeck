@@ -399,6 +399,18 @@ import CSQLite
     let incidents=IncidentEngine.incidents(events:events,nodeID:node); #expect(incidents.count == 1); #expect(incidents[0].observableCondition == "VPS connectivity outage"); #expect(incidents[0].recoveryState == .recovered); #expect(incidents[0].duration == 60)
 }
 
+@Test func incidentIdentifiersRemainStableAcrossRebuilds() {
+    let node=UUID(),start=Date(),downID=UUID(),upID=UUID()
+    let events=[
+        MonitoringEvent(id:downID,timestamp:start,component:"vps",title:"VPS offline",detail:"",state:.offline,recovered:false),
+        MonitoringEvent(id:upID,timestamp:start.addingTimeInterval(60),component:"vps",title:"VPS recovered",detail:"",state:.online,recovered:true)
+    ]
+    let first=IncidentEngine.incidents(events:events,nodeID:node),second=IncidentEngine.incidents(events:events,nodeID:node)
+    #expect(first.map(\.id)==second.map(\.id))
+    #expect(first.first?.id==downID)
+    #expect(first.first?.timeline.map(\.id)==[downID,upID])
+}
+
 @Test func exposureRequiresFirewallEvidenceAndMergesIPFamilies() {
     let listeners=[Listener(protocolName:"tcp",address:"0.0.0.0",port:53,process:"AdGuardHome"),Listener(protocolName:"tcp6",address:"::",port:53,process:"AdGuardHome")]
     let unknown=ExposureAnalyzer.analyze(listeners:listeners,nodeID:UUID(),publicAddresses:[],vpnAddresses:[],firewallEvidence:""); #expect(unknown.count == 1); #expect(unknown[0].classification == .unknown); #expect(unknown[0].addressFamily == .dualStack)
@@ -708,7 +720,7 @@ private actor AgentFixtureSource:AgentHistorySource{
 
 @Test func homePersistenceMigrationMergeAndPruning()async throws{
     let root=FileManager.default.temporaryDirectory.appendingPathComponent("HomeStore-\(UUID())");try FileManager.default.createDirectory(at:root,withIntermediateDirectories:true);defer{try? FileManager.default.removeItem(at:root)}
-    let store=try InfrastructureStore(url:root.appendingPathComponent("db.sqlite3"));#expect(try await store.schemaVersion()==6)
+    let store=try InfrastructureStore(url:root.appendingPathComponent("db.sqlite3"));#expect(try await store.schemaVersion()==7)
     let now=Date(),a=HomeDevice(displayName:"Manual Name",hostname:nil,ipv4:"192.168.1.10",ipv6:nil,macAddress:"aa:bb:cc:dd:ee:01",vendor:nil,type:.nas,customType:nil,status:.online,lastSeen:now,firstSeen:now,discoverySources:[.manual],nameIsManual:true,typeIsManual:true),b=HomeDevice(displayName:"Duplicate",hostname:nil,ipv4:"192.168.1.11",ipv6:nil,macAddress:"aa:bb:cc:dd:ee:02",vendor:nil,type:.unknown,customType:nil,status:.online,lastSeen:now,firstSeen:now,discoverySources:[.arp])
     try await store.save(homeDevice:a,observation:HomeDeviceObservation(deviceID:a.id,timestamp:now.addingTimeInterval(-2_700_000),status:.online,evidence:"old",ip:a.ipv4,source:.manual));try await store.save(homeDevice:b,observation:HomeDeviceObservation(deviceID:b.id,timestamp:now,status:.online,evidence:"fresh",ip:b.ipv4,source:.arp))
     #expect(try await store.homeObservations(deviceID:a.id,since:.distantPast).isEmpty)
@@ -717,12 +729,63 @@ private actor AgentFixtureSource:AgentHistorySource{
     #expect(devices.count==1);#expect(devices[0].displayName=="Manual Name");#expect(history.count==1);#expect(history[0].deviceID==a.id)
 }
 
-@Test func sqliteV5ToV6CreatesHomeInventoryAndSurvivesReopen()async throws{
+@Test func sqliteV5ToV7CreatesHomeInventoryAndSurvivesReopen()async throws{
     let root=FileManager.default.temporaryDirectory.appendingPathComponent("HomeV6-\(UUID())");try FileManager.default.createDirectory(at:root,withIntermediateDirectories:true);defer{try? FileManager.default.removeItem(at:root)};let url=root.appendingPathComponent("db.sqlite3")
     var db:OpaquePointer?;#expect(sqlite3_open(url.path,&db)==SQLITE_OK);#expect(sqlite3_exec(db,"PRAGMA user_version=5",nil,nil,nil)==SQLITE_OK);sqlite3_close(db)
     let deviceID:UUID
-    do{let store=try InfrastructureStore(url:url),device=HomeDevice(displayName:"Persistent",hostname:nil,ipv4:nil,ipv6:nil,macAddress:nil,vendor:nil,type:.unknown,customType:nil,status:.unknown,lastSeen:nil,firstSeen:Date(),discoverySources:[.manual]);deviceID=device.id;#expect(try await store.schemaVersion()==6);try await store.save(homeDevice:device)}
+    do{let store=try InfrastructureStore(url:url),device=HomeDevice(displayName:"Persistent",hostname:nil,ipv4:nil,ipv6:nil,macAddress:nil,vendor:nil,type:.unknown,customType:nil,status:.unknown,lastSeen:nil,firstSeen:Date(),discoverySources:[.manual],routerDisplayName:"Router Name",routerConnectionType:.wifi5,routerLastSeen:Date(),routerOnline:true);deviceID=device.id;#expect(try await store.schemaVersion()==7);try await store.save(homeDevice:device)}
     let reopened=try InfrastructureStore(url:url),devices=try await reopened.homeDevices();#expect(devices.count==1);#expect(devices[0].id==deviceID)
+    #expect(devices[0].routerDisplayName=="Router Name");#expect(devices[0].routerConnectionType == .wifi5);#expect(devices[0].routerOnline==true)
+}
+
+@Test func homeActiveDiscoveryCandidateBoundaries(){
+    let values=HomeDiscoveryService.ipv4Candidates(cidr:"192.168.50.0/24",excluding:"192.168.50.10",maxHosts:512)
+    #expect(values.count==253);#expect(!values.contains("192.168.50.0"));#expect(!values.contains("192.168.50.255"));#expect(!values.contains("192.168.50.10"));#expect(values.contains("192.168.50.1"))
+    #expect(HomeDiscoveryService.ipv4Candidates(cidr:"10.0.0.0/16",excluding:nil,maxHosts:512).isEmpty)
+}
+
+@Test func tpLinkReadAllowlistRejectsWriteActions(){
+    #expect(TPLinkArcherAX18Provider.allowed(path:"/admin/smart_network?form=game_accelerator",parameters:["operation":"loadDevice"]))
+    #expect(TPLinkArcherAX18Provider.allowed(path:"/admin/dhcps?form=client",parameters:["operation":"load"]))
+    #expect(!TPLinkArcherAX18Provider.allowed(path:"/admin/dhcps?form=client",parameters:["operation":"save"]))
+    #expect(!TPLinkArcherAX18Provider.allowed(path:"/admin/reboot",parameters:["operation":"load"]))
+    #expect(!TPLinkArcherAX18Provider.allowed(path:"/admin/dhcps?form=client",parameters:["operation":"load","extra":"1"]))
+}
+
+@Test func tpLinkSGStage2UsesAdminForBlankUsernameAndConfirmLoginPayload(){
+    #expect(TPLinkArcherAX18Provider.effectiveUsername(nil)=="admin")
+    #expect(TPLinkArcherAX18Provider.effectiveUsername("")=="admin")
+    #expect(TPLinkArcherAX18Provider.effectiveUsername("   ")=="admin")
+    #expect(TPLinkArcherAX18Provider.effectiveUsername("operator")=="operator")
+    #expect(TPLinkArcherAX18Provider.loginPayload(encryptedPassword:"deadbeef")=="operation=login&password=deadbeef&confirm=true")
+}
+
+@Test func tpLinkSGStage2ExtractsSysauthCookieCaseInsensitively(){
+    #expect(TPLinkArcherAX18Provider.sysauthCookie(from:["Set-Cookie":"sysauth=abc123; Path=/; HttpOnly"])=="abc123")
+    #expect(TPLinkArcherAX18Provider.sysauthCookie(from:["set-cookie":"foo=1; sysauth=xyz789; Path=/"])=="xyz789")
+    #expect(TPLinkArcherAX18Provider.sysauthCookie(from:["Set-Cookie":"foo=1; Path=/"])==nil)
+    let response=RouterHTTPResponse(data:Data(),headers:["SET-COOKIE":"sysauth=value"])
+    #expect(response.header("Set-Cookie")=="sysauth=value")
+}
+
+@Test func tpLinkInventoryNormalizesAndDeduplicatesSanitizedFixtures(){
+    let active:[String:Any]=["clients":[
+        ["mac":"02:11:22:33:44:55","ip":"192.0.2.10","hostname":"fixture-phone","device_tag":"5g","device_name":"Phone"],
+        ["mac":"02:11:22:33:44:66","ip":"192.0.2.20","hostname":"fixture-nas","device_tag":"wired"]
+    ]]
+    let leases:[String:Any]=["leases":[
+        ["macaddr":"02:11:22:33:44:55","ipaddr":"192.0.2.11","name":"dhcp-phone"],
+        ["macaddr":"02:11:22:33:44:77","ipaddr":"192.0.2.30","name":"sleeping-device"]
+    ]]
+    let merged=TPLinkArcherAX18Provider.merge(active:TPLinkArcherAX18Provider.parseActive(active),leases:TPLinkArcherAX18Provider.parseDHCP(leases))
+    #expect(merged.count==3);let phone=merged.first{$0.mac=="02:11:22:33:44:55"};#expect(phone?.ipv4=="192.0.2.10");#expect(phone?.online==true);#expect(phone?.connectionType == .wifi5);#expect(phone?.sources.contains(.routerDHCP)==true);#expect(phone?.sources.contains(.routerWireless)==true)
+    let sleeping=merged.first{$0.mac=="02:11:22:33:44:77"};#expect(sleeping?.online==nil);#expect(sleeping?.sources==[.routerDHCP])
+}
+
+@Test func routerDHCPKnowledgeDoesNotImplyOnline(){
+    let now=Date(),record=HomeDiscoveryRecord(ip:"192.0.2.30",mac:"02:11:22:33:44:77",hostname:"fixture",source:.routerDHCP,evidence:"Known lease",routerDisplayName:nil,connectionType:.unknown,online:nil)
+    let device=HomeDeviceReconciler.merge(existing:nil,record:record,now:now)
+    #expect(device.status == .unknown);#expect(device.lastSeen==nil);#expect(device.routerOnline==nil)
 }
 
 @Test func homeAccessProfileImportRenameDeleteAndPathSafety()throws{

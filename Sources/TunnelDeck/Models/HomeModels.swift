@@ -6,15 +6,17 @@ enum HomeDeviceType:String,Codable,Sendable,CaseIterable,Identifiable{
 }
 
 enum HomeDeviceReachability:String,Codable,Sendable{case online,offline,unknown}
-enum HomeDiscoverySource:String,Codable,Sendable,CaseIterable{case arp,ndp,bonjour,manual}
+enum HomeDiscoverySource:String,Codable,Sendable,CaseIterable{case routerClient="router-client",routerDHCP="router-dhcp",routerWireless="router-wireless",routerWired="router-wired",arp,ndp,bonjour,manual}
 enum HomeNetworkMode:String,Codable,Sendable{case homeLAN="HOME LAN",remote="REMOTE HOME ACCESS",other="OTHER NETWORK",unknown="UNKNOWN"}
+enum HomeRouterState:String,Codable,Sendable{case connected="Connected",authenticationRequired="Authentication Required",unavailable="Unavailable",notConfigured="Not Configured"}
+enum HomeConnectionType:String,Codable,Sendable{case ethernet="Ethernet",wifi24="Wi-Fi 2.4 GHz",wifi5="Wi-Fi 5 GHz",wifi6="Wi-Fi 6",wifi="Wi-Fi",unknown="Unknown"}
 
 struct HomeNetwork:Identifiable,Codable,Sendable,Equatable{
     var id=UUID();var name="Home";var cidr="";var routerIP="";var notes="";var createdAt=Date();var updatedAt=Date()
 }
 
 struct HomeDevice:Identifiable,Codable,Sendable,Hashable{
-    var id=UUID();var displayName:String;var hostname:String?;var ipv4:String?;var ipv6:String?;var macAddress:String?;var vendor:String?;var type:HomeDeviceType;var customType:String?;var status:HomeDeviceReachability;var lastSeen:Date?;var firstSeen:Date;var discoverySources:Set<HomeDiscoverySource>;var isPinned=false;var notes:String?;var preferredAccessURL:String?;var preferredSSHHost:String?;var nameIsManual=false;var typeIsManual=false;var reachabilityEvidence:String?;var lastSuccessfulObservation:Date?
+    var id=UUID();var displayName:String;var hostname:String?;var ipv4:String?;var ipv6:String?;var macAddress:String?;var vendor:String?;var type:HomeDeviceType;var customType:String?;var status:HomeDeviceReachability;var lastSeen:Date?;var firstSeen:Date;var discoverySources:Set<HomeDiscoverySource>;var isPinned=false;var notes:String?;var preferredAccessURL:String?;var preferredSSHHost:String?;var nameIsManual=false;var typeIsManual=false;var reachabilityEvidence:String?;var lastSuccessfulObservation:Date?;var routerDisplayName:String?;var routerConnectionType:HomeConnectionType?;var routerLastSeen:Date?;var routerOnline:Bool?
 }
 
 struct HomeDeviceObservation:Identifiable,Codable,Sendable{
@@ -22,11 +24,15 @@ struct HomeDeviceObservation:Identifiable,Codable,Sendable{
 }
 
 struct HomeDiscoveryRecord:Sendable,Equatable{
-    let ip:String;let mac:String?;let hostname:String?;let source:HomeDiscoverySource;let evidence:String
+    let ip:String;let mac:String?;let hostname:String?;let source:HomeDiscoverySource;let evidence:String;var routerDisplayName:String?=nil;var connectionType:HomeConnectionType?=nil;var online:Bool?=nil
+}
+
+struct HomeDiscoveryDiagnostics:Sendable,Equatable{
+    var mode="Passive";var candidates=0;var initialARP=0;var finalARP=0;var ndp=0;var routerRecords=0;var reconciled=0;var duration:TimeInterval=0;var message:String?
 }
 
 struct HomeNetworkSnapshot:Sendable,Equatable{
-    var macLANIP:String?;var probableSubnet:String?;var defaultGateway:String?;var interface:String?;var mode:HomeNetworkMode = .unknown;var routeEvidence:String="No verified route"
+    var macLANIP:String?;var probableSubnet:String?;var defaultGateway:String?;var interface:String?;var mode:HomeNetworkMode = .unknown;var routeEvidence:String="No verified route";var routerConfigurationWarning:String?
 }
 
 enum HomeDeviceIdentity{
@@ -40,10 +46,14 @@ enum HomeDeviceReconciler{
     static func merge(existing:HomeDevice?,record:HomeDiscoveryRecord,now:Date=Date())->HomeDevice{
         let mac=HomeDeviceIdentity.normalizedMAC(record.mac)
         var device=existing ?? HomeDevice(id:HomeDeviceIdentity.stableID(mac:mac,ip:record.ip,hostname:record.hostname),displayName:record.hostname ?? record.ip,hostname:record.hostname,ipv4:nil,ipv6:nil,macAddress:mac,vendor:nil,type:.unknown,customType:nil,status:.online,lastSeen:now,firstSeen:now,discoverySources:[],reachabilityEvidence:record.evidence,lastSuccessfulObservation:now)
-        if !device.nameIsManual,let hostname=record.hostname{device.displayName=hostname}
+        if !device.nameIsManual{if let routerName=record.routerDisplayName,!routerName.isEmpty{device.displayName=routerName}else if let hostname=record.hostname{device.displayName=hostname}}
         device.hostname=device.hostname ?? record.hostname;device.macAddress=mac ?? device.macAddress
         if record.ip.contains(":"){device.ipv6=record.ip}else{device.ipv4=record.ip}
-        device.status = .online;device.lastSeen=now;device.lastSuccessfulObservation=now;device.reachabilityEvidence=record.evidence;device.discoverySources.insert(record.source)
+        let isOnline=record.online == true || record.source == .arp || record.source == .ndp
+        if isOnline{device.status = .online;device.lastSeen=now;device.lastSuccessfulObservation=now}
+        else if existing == nil{device.status = .unknown;device.lastSeen=nil;device.lastSuccessfulObservation=nil}
+        device.reachabilityEvidence=record.evidence;device.discoverySources.insert(record.source)
+        if record.source == .routerClient || record.source == .routerWireless || record.source == .routerWired || record.source == .routerDHCP{device.routerDisplayName=record.routerDisplayName;device.routerConnectionType=record.connectionType;device.routerLastSeen=now;device.routerOnline=record.online}
         return device
     }
 }

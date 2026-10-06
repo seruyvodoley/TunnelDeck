@@ -1,6 +1,13 @@
-# TunnelDeck 2.2.0
+# TunnelDeck 2.2.2
 
-## TunnelDeck 2.2.0 release notes
+## TunnelDeck 2.2.2 release notes
+
+- Fixed TP-Link SG L1 S2 authentication: PKCS#1 v1.5 password encryption, OAEP login signatures, confirm=true, sysauth cookies and HMAC-SHA256 authenticated reads.
+- Incidents rendering now uses stable identities, lazy cards and bounded timelines to avoid UI stalls during frequent refreshes.
+- Home Devices now uses an authenticated, read-only TP-Link Archer AX18 client inventory as its primary source, with DHCP, ARP and NDP reconciliation.
+- Safe active neighbour warm-up fills gaps in the Mac's passive ARP cache while on a confirmed Home LAN.
+- Router credentials remain in macOS Keychain; router sessions stay in memory and all router write actions are rejected before transport.
+- Corrected default-gateway suggestions and added discovery diagnostics without exporting private device inventory.
 
 - Home Access now provides a persistent Home Devices inventory using local, unprivileged ARP and IPv6 neighbour evidence.
 - Configurable Home LAN identity distinguishes local access, verified VPN routing, other networks and unknown paths without changing the router.
@@ -92,6 +99,16 @@ Native macOS control panel for a self-hosted WireGuard, AntiZapret and AdGuard H
 TunnelDeck does **not** create or replace the WireGuard server. It manages peers on an existing installation and never regenerates the server private key.
 
 ## Install
+
+### Keep one installed copy on macOS
+
+For normal updates, keep a single checkout of this repository on `main` and run:
+
+```bash
+bash Scripts/update-install-macos.sh
+```
+
+The script fast-forwards `main`, builds the current Release executable, replaces `~/Applications/TunnelDeck.app`, removes the old repository-local `dist/TunnelDeck.app` build artifact, ad-hoc signs the bundle, and opens the updated app. It refuses to overwrite a source tree that has uncommitted changes.
 
 ### Build in Xcode
 
