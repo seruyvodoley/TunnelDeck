@@ -9,7 +9,7 @@ struct IncidentView: View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 16) {
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 170))]) {
-                    tile("Active", model.incidents.lazy.filter { $0.recoveryState == .active }.count.description)
+                    tile("Active", model.incidents.filter { $0.recoveryState == .active }.count.description)
                     tile("Incidents · 24h", snapshot.day.description)
                     tile("Incidents · 7d", snapshot.week.description)
                     tile("VPS downtime · 24h", duration(snapshot.downtime))
