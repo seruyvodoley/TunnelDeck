@@ -399,6 +399,18 @@ import CSQLite
     let incidents=IncidentEngine.incidents(events:events,nodeID:node); #expect(incidents.count == 1); #expect(incidents[0].observableCondition == "VPS connectivity outage"); #expect(incidents[0].recoveryState == .recovered); #expect(incidents[0].duration == 60)
 }
 
+@Test func incidentIdentifiersRemainStableAcrossRebuilds() {
+    let node=UUID(),start=Date(),downID=UUID(),upID=UUID()
+    let events=[
+        MonitoringEvent(id:downID,timestamp:start,component:"vps",title:"VPS offline",detail:"",state:.offline,recovered:false),
+        MonitoringEvent(id:upID,timestamp:start.addingTimeInterval(60),component:"vps",title:"VPS recovered",detail:"",state:.online,recovered:true)
+    ]
+    let first=IncidentEngine.incidents(events:events,nodeID:node),second=IncidentEngine.incidents(events:events,nodeID:node)
+    #expect(first.map(\.id)==second.map(\.id))
+    #expect(first.first?.id==downID)
+    #expect(first.first?.timeline.map(\.id)==[downID,upID])
+}
+
 @Test func exposureRequiresFirewallEvidenceAndMergesIPFamilies() {
     let listeners=[Listener(protocolName:"tcp",address:"0.0.0.0",port:53,process:"AdGuardHome"),Listener(protocolName:"tcp6",address:"::",port:53,process:"AdGuardHome")]
     let unknown=ExposureAnalyzer.analyze(listeners:listeners,nodeID:UUID(),publicAddresses:[],vpnAddresses:[],firewallEvidence:""); #expect(unknown.count == 1); #expect(unknown[0].classification == .unknown); #expect(unknown[0].addressFamily == .dualStack)
