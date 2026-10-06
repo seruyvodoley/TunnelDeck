@@ -1,0 +1,23 @@
+name: macOS CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Swift version
+        run: swift --version
+      - name: Swift tests
+        run: swift test
+      - name: Release build
+        run: swift build -c release
+      - name: Server component tests
+        run: python3 -m unittest discover -s Tests -p '*Tests.py'
