@@ -384,6 +384,140 @@ struct DiagnosticsView: View {
 
 struct RouterView: View {
     @EnvironmentObject var model: AppViewModel
-    var reachable: Bool { !model.system.macLANIP.isEmpty && model.system.macLANIP != "—" }
-    var body: some View { ScrollView { LazyVGrid(columns: [GridItem(.adaptive(minimum: 340))], spacing: 16) { MetricCard(title: "Home Router", icon: "wifi.router") { VStack(spacing: 10) { HStack { StatusDot(state: model.home.snapshot.mode == .homeLAN ? .online:.unknown); Text(model.home.snapshot.mode.rawValue); Spacer() }; KeyValueRow(key: "Current Mac LAN", value: model.home.snapshot.macLANIP ?? model.system.macLANIP);KeyValueRow(key:"Home network",value:model.home.network?.name ?? "Not configured");KeyValueRow(key:"Router",value:(model.home.network?.routerIP.isEmpty == false ? model.home.network?.routerIP:nil) ?? "Unknown");KeyValueRow(key:"Known devices",value:String(model.home.devices.count));KeyValueRow(key:"Seen now",value:String(model.home.devices.filter{$0.status == .online}.count));Button("View Home Devices"){model.selectedSection = .homeAccess}; Text("TunnelDeck never stores router credentials or uses private vendor APIs.").foregroundStyle(.secondary) } } }.padding(20) } }
+    private let columns=[GridItem(.adaptive(minimum:340),spacing:16)]
+
+    var body: some View {
+        ScrollView {
+            LazyVGrid(columns:columns,alignment:.leading,spacing:16) {
+                MetricCard(title:"Home Network",icon:"house.and.flag.fill") {
+                    VStack(spacing:10) {
+                        HStack { StatusDot(state:homeLANState); Text(model.home.snapshot.mode.rawValue); Spacer() }
+                        KeyValueRow(key:"Current Mac LAN",value:model.home.snapshot.macLANIP ?? model.system.macLANIP)
+                        KeyValueRow(key:"Home network",value:model.home.network?.name ?? "Not configured")
+                        KeyValueRow(key:"Home LAN",value:model.home.network?.cidr ?? "Unknown")
+                        KeyValueRow(key:"Home uplink",value:model.home.network?.routerIP ?? "Unknown")
+                        KeyValueRow(key:"Policy gateway",value:model.homeInfrastructure.gateway.host ?? model.home.snapshot.defaultGateway ?? "Unknown")
+                        KeyValueRow(key:"Known devices",value:String(model.home.devices.count))
+                        KeyValueRow(key:"Seen now",value:String(model.home.devices.filter{$0.status == .online}.count))
+                        Button("View Home Devices"){model.selectedSection = .homeAccess}
+                    }
+                }
+
+                MetricCard(title:"TunnelDeck Gateway",icon:"point.3.connected.trianglepath.dotted") {
+                    let gateway=model.homeInfrastructure.gateway
+                    VStack(spacing:10) {
+                        HStack { StatusDot(state:gateway.state); Text(gateway.hostname ?? "OpenWrt").font(.headline); Spacer(); Text(gateway.state.rawValue.capitalized).foregroundStyle(.secondary) }
+                        KeyValueRow(key:"Host",value:gateway.host ?? "Unknown")
+                        KeyValueRow(key:"Model",value:gateway.model ?? "Unknown")
+                        KeyValueRow(key:"OpenWrt",value:gateway.version ?? "Unknown")
+                        KeyValueRow(key:"Uptime",value:gateway.uptime ?? "Unknown")
+                        KeyValueRow(key:"LAN IP",value:gateway.lanIPv4 ?? "Unknown")
+                        KeyValueRow(key:"Main route",value:mainRouteText)
+                        KeyValueRow(key:"IPv4 forwarding",value:boolText(gateway.ipv4Forwarding))
+                        KeyValueRow(key:"DHCP role",value:boolText(gateway.dhcpServer))
+                        KeyValueRow(key:"DNS role",value:boolText(gateway.dnsServer))
+                        KeyValueRow(key:"filter_aaaa",value:boolText(gateway.filterAAAA))
+                        KeyValueRow(key:"Upstream DNS",value:gateway.upstreamDNS.isEmpty ? "Unknown":gateway.upstreamDNS.joined(separator:", "))
+                    }
+                }
+
+                MetricCard(title:"Home Foreign Policy",icon:"arrow.triangle.branch") {
+                    let gateway=model.homeInfrastructure.gateway
+                    VStack(spacing:10) {
+                        HStack { StatusDot(state:model.homeInfrastructure.foreignPathConfirmed ? .online:.unknown); Text("Policy routing").font(.headline); Spacer() }
+                        KeyValueRow(key:"RU prefixes",value:gateway.ruPrefixCount.map(String.init) ?? "Unknown")
+                        KeyValueRow(key:"Foreign mark",value:gateway.foreignMark ?? "Unknown")
+                        KeyValueRow(key:"Rule priority",value:gateway.foreignPriority.map(String.init) ?? "Unknown")
+                        KeyValueRow(key:"Routing table",value:gateway.foreignTable ?? "Unknown")
+                        KeyValueRow(key:"Foreign default",value:gateway.foreignInterface ?? "Unknown")
+                        KeyValueRow(key:"nft evidence",value:gateway.nftEvidence.isEmpty ? "Unknown":"\(gateway.nftEvidence.count) matching lines")
+                        KeyValueRow(key:"Split script",value:gateway.scripts.first(where:{$0.contains("tunneldeck-home-split")}) ?? "Not observed")
+                    }
+                }
+
+                MetricCard(title:"VPS Remote RU Policy",icon:"arrow.uturn.backward.circle") {
+                    let policy=model.homeInfrastructure.vpsPolicy
+                    VStack(spacing:10) {
+                        HStack { StatusDot(state:policy.state); Text("Remote clients").font(.headline); Spacer() }
+                        KeyValueRow(key:"Public interface",value:policy.publicInterface ?? "Unknown")
+                        KeyValueRow(key:"RU prefixes",value:policy.ruPrefixCount.map(String.init) ?? "Unknown")
+                        KeyValueRow(key:"RU mark",value:policy.ruMark ?? "Unknown")
+                        KeyValueRow(key:"Rule priority",value:policy.ruPriority.map(String.init) ?? "Unknown")
+                        KeyValueRow(key:"Routing table",value:policy.ruTable ?? "Unknown")
+                        KeyValueRow(key:"Home exit",value:policy.homeExitInterface ?? "Unknown")
+                    }
+                }
+
+                ForEach(model.homeInfrastructure.gatewayTunnels){tunnel in
+                    tunnelCard(tunnel,location:"OpenWrt")
+                }
+
+                ForEach(model.homeInfrastructure.vpsTunnels.filter{vps in !model.homeInfrastructure.gatewayTunnels.contains(where:{$0.name==vps.name})}){tunnel in
+                    tunnelCard(tunnel,location:"VPS")
+                }
+
+                MetricCard(title:"Direct Exceptions",icon:"arrowshape.turn.up.right") {
+                    VStack(alignment:.leading,spacing:8) {
+                        if model.homeInfrastructure.gateway.directExceptions.isEmpty {
+                            Text("No DIRECT exception IPs were confirmed by the latest nftables snapshot.").foregroundStyle(.secondary)
+                        } else {
+                            ForEach(model.homeInfrastructure.gateway.directExceptions,id:\.self){ip in
+                                HStack {
+                                    Text(ip).monospaced()
+                                    Spacer()
+                                    Text(deviceName(ip)).foregroundStyle(.secondary)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                MetricCard(title:"Discovery",icon:"scope") {
+                    VStack(spacing:10) {
+                        KeyValueRow(key:"Source",value:model.homeInfrastructure.sourceSummary)
+                        KeyValueRow(key:"Last attempt",value:model.homeInfrastructure.lastAttemptAt?.formatted(.relative(presentation:.numeric)) ?? "Never")
+                        KeyValueRow(key:"Last confirmed",value:model.homeInfrastructure.observedAt?.formatted(.relative(presentation:.numeric)) ?? "Never")
+                        KeyValueRow(key:"OpenWrt evidence",value:model.homeInfrastructure.gateway.evidence ?? "Unknown")
+                        KeyValueRow(key:"VPS evidence",value:model.homeInfrastructure.vpsPolicy.evidence ?? "Unknown")
+                        Text("Discovery is read-only. It does not change UCI, nftables, routes, tunnels, DHCP, DNS or systemd/init state.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .padding(20)
+        }
+    }
+
+    private func tunnelCard(_ tunnel:InfrastructureTunnelSnapshot,location:String)->some View{
+        MetricCard(title:tunnel.name,icon:tunnel.transport=="AmneziaWG" ? "shield.lefthalf.filled":"network") {
+            VStack(spacing:10) {
+                HStack { StatusDot(state:tunnel.state); Text(tunnel.role).font(.headline); Spacer(); Text(location).foregroundStyle(.secondary) }
+                KeyValueRow(key:"Transport",value:tunnel.transport)
+                KeyValueRow(key:"Local",value:tunnel.localAddress ?? "Unknown")
+                KeyValueRow(key:"Peer",value:tunnel.peerAddress ?? "Unknown")
+                KeyValueRow(key:"Endpoint",value:tunnel.endpoint ?? "Unknown")
+                KeyValueRow(key:"Listen port",value:tunnel.listenPort.map(String.init) ?? "Unknown")
+                KeyValueRow(key:"MTU",value:tunnel.mtu.map(String.init) ?? "Unknown")
+                KeyValueRow(key:"Handshake",value:tunnel.latestHandshake?.formatted(.relative(presentation:.numeric)) ?? "Unknown")
+                KeyValueRow(key:"RX / TX",value:"\(tunnel.receivedBytes.byteString) / \(tunnel.sentBytes.byteString)")
+                KeyValueRow(key:"Evidence",value:tunnel.evidence ?? "Unknown")
+            }
+        }
+    }
+
+    private var homeLANState:HealthState{
+        switch model.home.snapshot.mode{case .homeLAN,.remote:return .online;case .other,.unknown:return .unknown}
+    }
+
+    private var mainRouteText:String{
+        let gateway=model.homeInfrastructure.gateway
+        let parts=[gateway.defaultGateway,gateway.defaultInterface].compactMap{$0}
+        return parts.isEmpty ? "Unknown":parts.joined(separator:" via ")
+    }
+
+    private func boolText(_ value:Bool?)->String{value.map{$0 ? "Active":"Inactive"} ?? "Unknown"}
+
+    private func deviceName(_ ip:String)->String{
+        model.home.devices.first(where:{$0.ipv4==ip})?.displayName ?? "Observed rule"
+    }
 }
