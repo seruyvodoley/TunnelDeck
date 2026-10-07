@@ -1,6 +1,16 @@
-# TunnelDeck 2.2.3
+# TunnelDeck 2.3.0
 
-## TunnelDeck 2.2.3 release notes
+## TunnelDeck 2.3.0 release notes
+
+- Added live read-only discovery of the OpenWrt TunnelDeck Gateway and VPS policy-routing state.
+- Overview now keeps all existing VPS cards and adds compact Home Uplink, TunnelDeck Gateway, foreign-tunnel, remote-RU-home-exit and management-tunnel cards.
+- Topology is now built from discovery evidence instead of the old linear VPS/Home summary, with separate DIRECT, FOREIGN, SERVICE WG, DNS and LAN flows.
+- OpenWrt discovery observes board/version, uptime, LAN address, main route, DHCP/DNS roles, IPv4 forwarding, filter_aaaa, marked routing policy, nftables evidence, RU prefix set size, TunnelDeck scripts and WireGuard/AmneziaWG interfaces.
+- VPS discovery observes marked policy routes, td_ru4 count, public interface and all WireGuard/AmneziaWG interfaces without changing server state.
+- The foreign transport and policy interface names are derived from live route/rule evidence; they are not assumed to be named awgtd0.
+- Missing SSH, route, rule, handshake or nftables evidence stays Unknown rather than being synthesized as Online.
+- Home infrastructure discovery reuses the existing SSH safety boundary. It prefers ~/.ssh/tunneldeck_openwrt_rsa for OpenWrt when present and retains the last successfully confirmed OpenWrt host for remote tdhome access.
+
 
 - Fixed TP-Link Archer AX18 SG L1 S2 session compatibility by sending the browser-compatible Referer and Origin headers used by the router web client/reference implementation.
 
@@ -207,7 +217,7 @@ SSH and the detected clean WireGuard port form the automatic public baseline. Ot
 - Secrets are redacted before UI display and local logging.
 - PrivateKey, PresharedKey, authorization headers, bearer tokens, cookies and passwords are masked.
 - No automatic package, distribution, kernel or operating-system upgrades.
-- No router login or reverse-engineered vendor API.
+- Router inventory access is read-only and scoped to the supported TP-Link client-inventory protocol; OpenWrt/VPS topology discovery uses fixed allowlisted SSH read commands only.
 
 Read `ARCHITECTURE.md` for the application, SSH and transaction design. Read `RECOVERY.md` before enabling write mode.
 
