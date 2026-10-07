@@ -768,6 +768,16 @@ private actor AgentFixtureSource:AgentHistorySource{
     #expect(TPLinkArcherAX18Provider.loginPayload(encryptedPassword:"deadbeef")=="operation=login&password=deadbeef&confirm=true")
 }
 
+@Test func tpLinkSGStage2UsesBrowserCompatibleManagementHeaders(){
+    let base=URL(string:"http://192.168.0.1/")!
+    #expect(TPLinkArcherAX18Provider.origin(baseURL:base)=="http://192.168.0.1")
+    #expect(TPLinkArcherAX18Provider.loginHeaders(baseURL:base)["Referer"]=="http://192.168.0.1/webpages/index.html")
+    #expect(TPLinkArcherAX18Provider.requestHeaders(baseURL:base)["Referer"]=="http://192.168.0.1/webpages/index.html")
+    #expect(TPLinkArcherAX18Provider.requestHeaders(baseURL:base)["Origin"]=="http://192.168.0.1")
+    let custom=URL(string:"https://192.168.0.1:8443/")!
+    #expect(TPLinkArcherAX18Provider.origin(baseURL:custom)=="https://192.168.0.1:8443")
+}
+
 @Test func tpLinkSGStage2ExtractsSysauthCookieCaseInsensitively(){
     #expect(TPLinkArcherAX18Provider.sysauthCookie(from:["Set-Cookie":"sysauth=abc123; Path=/; HttpOnly"])=="abc123")
     #expect(TPLinkArcherAX18Provider.sysauthCookie(from:["set-cookie":"foo=1; sysauth=xyz789; Path=/"])=="xyz789")
