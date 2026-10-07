@@ -44,7 +44,7 @@ final class HomeAccessController:ObservableObject{
     }
     func stop()async{refreshTask?.cancel();refreshTask=nil;isRefreshing=false;await discovery.cancel()}
     private func apply(snapshot newSnapshot:HomeNetworkSnapshot,records:[HomeDiscoveryRecord],diagnostics newDiagnostics:HomeDiscoveryDiagnostics)async{
-        let now=Date();var updated=devices.map{device in var value=device;value.status=HomePresence.status(lastSeen:value.lastSeen,now:now,homeMode:newSnapshot.mode);return value}
+        let now=Date();var updated=devices.map{device in var value=device;value.status=HomePresence.retainedStatus(current:value.status,lastSeen:value.lastSeen,now:now,homeMode:newSnapshot.mode);return value}
         var observedIDs=Set<UUID>()
         for record in records{
             let mac=HomeDeviceIdentity.normalizedMAC(record.mac),id=HomeDeviceIdentity.stableID(mac:mac,ip:record.ip,hostname:record.hostname)

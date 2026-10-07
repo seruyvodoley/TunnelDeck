@@ -718,6 +718,14 @@ private actor AgentFixtureSource:AgentHistorySource{
     #expect(HomePresence.status(lastSeen:now.addingTimeInterval(-90_000),now:now,homeMode:.remote) == .unknown)
 }
 
+@Test func homePresenceRetainsLastKnownStatusAcrossPassiveRefresh(){
+    let now=Date()
+    #expect(HomePresence.retainedStatus(current:.online,lastSeen:now.addingTimeInterval(-3600),now:now,homeMode:.homeLAN) == .online)
+    #expect(HomePresence.retainedStatus(current:.offline,lastSeen:now.addingTimeInterval(-3600),now:now,homeMode:.remote) == .offline)
+    #expect(HomePresence.retainedStatus(current:.unknown,lastSeen:now.addingTimeInterval(-3600),now:now,homeMode:.homeLAN) == .unknown)
+    #expect(HomePresence.retainedStatus(current:.online,lastSeen:now.addingTimeInterval(-90_000),now:now,homeMode:.homeLAN) == .offline)
+}
+
 @Test func homePersistenceMigrationMergeAndPruning()async throws{
     let root=FileManager.default.temporaryDirectory.appendingPathComponent("HomeStore-\(UUID())");try FileManager.default.createDirectory(at:root,withIntermediateDirectories:true);defer{try? FileManager.default.removeItem(at:root)}
     let store=try InfrastructureStore(url:root.appendingPathComponent("db.sqlite3"));#expect(try await store.schemaVersion()==7)

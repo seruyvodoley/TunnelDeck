@@ -60,5 +60,9 @@ enum HomeDeviceReconciler{
 
 enum HomePresence{
     static func status(lastSeen:Date?,now:Date=Date(),homeMode:HomeNetworkMode)->HomeDeviceReachability{guard let lastSeen else{return .unknown};let age=now.timeIntervalSince(lastSeen);if age<=120{return .online};if homeMode == .homeLAN && age>=86_400{return .offline};return .unknown}
+    static func retainedStatus(current:HomeDeviceReachability,lastSeen:Date?,now:Date=Date(),homeMode:HomeNetworkMode)->HomeDeviceReachability{
+        let inferred=status(lastSeen:lastSeen,now:now,homeMode:homeMode)
+        return inferred == .unknown ? current:inferred
+    }
     static func label(_ date:Date?,now:Date=Date())->String{guard let date else{return "Never confirmed"};let age=now.timeIntervalSince(date);if age<90{return "Seen now"};return "Seen \(date.formatted(.relative(presentation:.numeric)))"}
 }
