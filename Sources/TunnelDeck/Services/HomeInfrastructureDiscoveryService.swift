@@ -96,8 +96,10 @@ enum HomeInfrastructureParser{
         gateway.directExceptions=parseDirectExceptions(sections["DIRECT"] ?? "")
         gateway.scripts=(sections["SCRIPTS"] ?? "").split(separator:"\n").map(String.init).filter{!$0.isEmpty}
 
-        let allTunnelText=[sections["WG"] ?? "",sections["AWG"] ?? ""].joined(separator:"\n")
-        var tunnels=parseTunnels(allTunnelText,interfaces:sections["INTERFACES"] ?? "",links:sections["LINKS"] ?? "",commandSucceeded:commandSucceeded,observedOn:"OpenWrt",now:now,handshakeTimeout:handshakeTimeout)
+        var tunnels=mergeTunnelSources(
+            wireGuard:parseTunnels(sections["WG"] ?? "",transport:"WireGuard",interfaces:sections["INTERFACES"] ?? "",links:sections["LINKS"] ?? "",commandSucceeded:commandSucceeded,observedOn:"OpenWrt",now:now,handshakeTimeout:handshakeTimeout),
+            amnezia:parseTunnels(sections["AWG"] ?? "",transport:"AmneziaWG",interfaces:sections["INTERFACES"] ?? "",links:sections["LINKS"] ?? "",commandSucceeded:commandSucceeded,observedOn:"OpenWrt",now:now,handshakeTimeout:handshakeTimeout)
+        )
         if let foreign=gateway.foreignInterface{assignRole("Foreign Exit",to:foreign,in:&tunnels)}
         if let homeExit=vpsTunnels.first(where:{$0.role=="Remote RU Home Exit"})?.name{assignRole("Remote RU Home Exit",to:homeExit,in:&tunnels)}
 
@@ -118,8 +120,10 @@ enum HomeInfrastructureParser{
         if let ru=policies.first(where:{$0.interface != nil && $0.interface != policy.publicInterface}){
             policy.ruMark=ru.mark;policy.ruPriority=ru.priority;policy.ruTable=ru.table;policy.homeExitInterface=ru.interface
         }
-        let allTunnelText=[sections["WG"] ?? "",sections["AWG"] ?? ""].joined(separator:"\n")
-        var tunnels=parseTunnels(allTunnelText,interfaces:sections["INTERFACES"] ?? "",links:sections["LINKS"] ?? "",commandSucceeded:commandSucceeded,observedOn:"VPS",now:now,handshakeTimeout:handshakeTimeout)
+        var tunnels=mergeTunnelSources(
+            wireGuard:parseTunnels(sections["WG"] ?? "",transport:"WireGuard",interfaces:sections["INTERFACES"] ?? "",links:sections["LINKS"] ?? "",commandSucceeded:commandSucceeded,observedOn:"VPS",now:now,handshakeTimeout:handshakeTimeout),
+            amnezia:parseTunnels(sections["AWG"] ?? "",transport:"AmneziaWG",interfaces:sections["INTERFACES"] ?? "",links:sections["LINKS"] ?? "",commandSucceeded:commandSucceeded,observedOn:"VPS",now:now,handshakeTimeout:handshakeTimeout)
+        )
         if let homeExit=policy.homeExitInterface{assignRole("Remote RU Home Exit",to:homeExit,in:&tunnels)}
         if tunnels.contains(where:{$0.name=="wg0"}){assignRole("Remote Access VPN",to:"wg0",in:&tunnels)}
         return VPSResult(policy:policy,tunnels:tunnels)
@@ -175,7 +179,7 @@ enum HomeInfrastructureParser{
         gateway.upstreamDNS=(values["servers"] ?? "").split(whereSeparator:{ $0==" " || $0=="," }).map(String.init).filter{IPv4Validator.isValid($0)}
     }
 
-    private static func parseTunnels(_ text:String,interfaces:String,links:String,commandSucceeded:Bool,observedOn:String,now:Date,handshakeTimeout:TimeInterval)->[InfrastructureTunnelSnapshot]{
+    private static func parseTunnels(_ text:String,transport:String,interfaces:String,links:String,commandSucceeded:Bool,observedOn:String,now:Date,handshakeTimeout:TimeInterval)->[InfrastructureTunnelSnapshot]{
         let blocks=interfaceBlocks(text)
         var result:[InfrastructureTunnelSnapshot]=[]
         for(name,block)in blocks{
@@ -185,7 +189,7 @@ enum HomeInfrastructureParser{
             let local=interfaceAddress(name,in:interfaces)
             let state:HealthState
             if let peer{state=peer.latestHandshake == nil ? .warning:peer.status}else{state=.online}
-            result.append(InfrastructureTunnelSnapshot(name:name,role:"Discovered Tunnel",transport:name.lowercased().contains("awg") ? "AmneziaWG":"WireGuard",localAddress:local,peerAddress:peerAddress(from:local,allowed:peer?.vpnIP),endpoint:peer?.endpoint=="—" ? nil:peer?.endpoint,listenPort:Int(parsed.listenPort),mtu:linkMTU(name,in:links),latestHandshake:peer?.latestHandshake,receivedBytes:parsed.receivedBytes,sentBytes:parsed.sentBytes,state:state,observedOn:[observedOn],evidence:"Interface observed by \(observedOn) SSH"))
+            result.append(InfrastructureTunnelSnapshot(name:name,role:"Discovered Tunnel",transport:transport,localAddress:local,peerAddress:peerAddress(from:local,allowed:peer?.vpnIP),endpoint:peer?.endpoint=="—" ? nil:peer?.endpoint,listenPort:Int(parsed.listenPort),mtu:linkMTU(name,in:links),latestHandshake:peer?.latestHandshake,receivedBytes:parsed.receivedBytes,sentBytes:parsed.sentBytes,state:state,observedOn:[observedOn],evidence:"\(transport) interface observed by \(observedOn) SSH"))
         }
         if commandSucceeded{
             for expected in ["awgtd0","homeexit","tdhome"] where !result.contains(where:{$0.name==expected}){
@@ -193,6 +197,12 @@ enum HomeInfrastructureParser{
             }
         }
         return result.sorted{$0.name<$1.name}
+    }
+
+    private static func mergeTunnelSources(wireGuard:[InfrastructureTunnelSnapshot],amnezia:[InfrastructureTunnelSnapshot])->[InfrastructureTunnelSnapshot]{
+        var values=Dictionary(uniqueKeysWithValues:wireGuard.map{($0.name,$0)})
+        for tunnel in amnezia{values[tunnel.name]=tunnel}
+        return values.values.sorted{$0.name<$1.name}
     }
 
     private static func interfaceBlocks(_ text:String)->[String:String]{
