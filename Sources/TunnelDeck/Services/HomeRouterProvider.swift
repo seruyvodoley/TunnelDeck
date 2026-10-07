@@ -146,7 +146,7 @@ actor TPLinkArcherAX18Provider: RouterClientInventoryProvider {
             throw HomeRouterProviderError.malformedResponse
         }
 
-        let effectiveUsername = Self.effectiveUsername(username)
+        let effectiveUsername = Self.effectiveUsername(userInput: username, routerUsername: Self.string(keys["username"]))
         let session = try TPLinkCryptoSession(
             username: effectiveUsername,
             password: password,
@@ -272,9 +272,11 @@ actor TPLinkArcherAX18Provider: RouterClientInventoryProvider {
         return true
     }
 
-    static func effectiveUsername(_ username: String?) -> String {
-        let value = username?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return value.isEmpty ? "admin" : value
+    static func effectiveUsername(userInput: String?, routerUsername: String?) -> String {
+        if let routerUsername {
+            return routerUsername
+        }
+        return userInput?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     }
 
     static func loginPayload(encryptedPassword: String) -> String {
