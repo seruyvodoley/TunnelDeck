@@ -11,6 +11,212 @@ struct FleetOverviewView: View {
 
 struct TopologyView: View {
     @EnvironmentObject var model: AppViewModel
-    var body: some View { ScrollView { VStack(alignment: .leading, spacing: 16) { Text("Only relationships confirmed by the latest discovery are shown. Missing evidence remains Unknown.").foregroundStyle(.secondary); row("Internet", model.system.sshAvailable ? .online : .unknown, 0); row(model.activeNodeName, model.system.health, 1); row("SSH", model.system.sshAvailable ? .online : .unknown, 2); if model.wireGuard.state != .unknown { row("WireGuard \(model.wireGuard.interface)", model.wireGuard.state, 2, "\(model.wireGuard.peers.count) discovered peers") }; ForEach(model.units.filter { $0.name.localizedCaseInsensitiveContains("AdGuardHome") || $0.name == "antizapret.service" }) { unit in row(unit.name.localizedCaseInsensitiveContains("AdGuard") ? "AdGuard DNS" : "AntiZapret", unit.health, 2) }; ForEach(model.security.publicListeners.filter { $0.service.contains("OpenVPN") || ($0.service.contains("WireGuard") && $0.service != "Clean WireGuard") }) { endpoint in row(endpoint.service, endpoint.state, 2, "\(endpoint.protocolName):\(endpoint.port)") };if let home=model.home.network{Divider();row("Home Router",model.home.snapshot.mode == .homeLAN || model.home.snapshot.mode == .remote ? .online:.unknown,0,home.routerIP);row("Home LAN \(home.cidr)",model.home.snapshot.mode == .homeLAN || model.home.snapshot.mode == .remote ? .online:.unknown,1,"\(model.home.devices.count) known devices");ForEach(model.home.devices.filter{$0.isPinned}.prefix(8)){device in row(device.displayName,device.status == .online ? .online:device.status == .offline ? .offline:.unknown,2,device.ipv4 ?? device.ipv6)}} }.padding(24).frame(maxWidth: 720, alignment: .leading) } }
-    private func row(_ title: String, _ state: HealthState, _ indent: Int, _ detail: String? = nil) -> some View { HStack { ForEach(0..<indent, id: \.self) { _ in Image(systemName: "arrow.turn.down.right").foregroundStyle(.tertiary) }; StatusDot(state: state); VStack(alignment: .leading) { Text(title).fontWeight(.semibold); if let detail { Text(detail).font(.caption).foregroundStyle(.secondary) } }; Spacer(); Text(state.rawValue.capitalized).foregroundStyle(.secondary) }.padding(10).background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 10)) }
+
+    private struct Node:Identifiable{
+        let id:String
+        let title:String
+        let detail:String?
+        let state:HealthState
+        init(_ title:String,_ state:HealthState,_ detail:String?=nil){self.id="\(title)|\(detail ?? "")";self.title=title;self.detail=detail;self.state=state}
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment:.leading,spacing:20) {
+                HStack(alignment:.firstTextBaseline) {
+                    VStack(alignment:.leading,spacing:4) {
+                        Text("Live architecture").font(.title2.bold())
+                        Text("Nodes and routes come from the latest read-only VPS, OpenWrt and Home LAN discovery. Missing evidence stays Unknown.")
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    if let date=model.homeInfrastructure.observedAt {
+                        Text("Last discovery \(date.formatted(.relative(presentation:.numeric)))").font(.caption).foregroundStyle(.secondary)
+                    } else {
+                        Text("Never discovered").font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+
+                topologySection("Home split routing","Home clients use the OpenWrt policy gateway. DIRECT and foreign paths are shown independently.") {
+                    flowLine(.local,label:"LAN",nodes:[
+                        Node("Home Devices",homeLANState,"\(model.homeInfrastructure.homeDeviceCount) known"),
+                        gatewayNode
+                    ])
+                    flowLine(.direct,label:directLabel,nodes:[
+                        gatewayNode,
+                        uplinkNode,
+                        Node("RU Internet",model.homeInfrastructure.directPathConfirmed && uplinkState == .online ? .unknown:.unknown,"Route evidence only")
+                    ])
+                    flowLine(.foreign,label:foreignLabel,nodes:[
+                        gatewayNode,
+                        tunnelNode(model.homeInfrastructure.foreignTunnel,fallback:"Foreign Tunnel"),
+                        Node(model.activeNodeName,model.system.health,model.system.publicIPv4),
+                        Node("Foreign Internet",model.system.publicIPv4 == "—" ? .unknown:.online,"VPS egress")
+                    ])
+                }
+
+                topologySection("Remote WireGuard","Remote clients enter through VPS wg0. Foreign traffic exits at the VPS; RU traffic may return home through the discovered home-exit policy.") {
+                    flowLine(.service,label:"Remote access",nodes:[
+                        Node("Remote WG Client",remoteClientState,remoteClientDetail),
+                        Node("VPS wg0",model.wireGuard.state,model.wireGuard.address),
+                        Node("Foreign Internet",model.system.publicIPv4 == "—" ? .unknown:.online,model.system.publicIPv4)
+                    ])
+                    flowLine(.direct,label:remoteRULabel,nodes:[
+                        Node("VPS wg0",model.wireGuard.state,model.wireGuard.address),
+                        tunnelNode(model.homeInfrastructure.homeExitTunnel,fallback:"RU Home Exit"),
+                        gatewayNode,
+                        uplinkNode,
+                        Node("Russian Internet",.unknown,"Path observed; external reachability not assumed")
+                    ])
+                }
+
+                topologySection("Remote Home LAN management","The management path is discovered from the route between the VPS WireGuard subnet and the Home LAN gateway.") {
+                    flowLine(.service,label:managementLabel,nodes:[
+                        Node("Remote WG Client",remoteClientState,remoteClientDetail),
+                        Node("VPS wg0",model.wireGuard.state,model.wireGuard.address),
+                        tunnelNode(model.homeInfrastructure.managementTunnel,fallback:"Management Tunnel"),
+                        gatewayNode,
+                        Node("Home LAN \(model.homeInfrastructure.homeCIDR ?? "Unknown")",homeLANState,"\(model.homeInfrastructure.homeDeviceCount) known devices")
+                    ])
+                }
+
+                topologySection("DNS","Home DNS is served by the OpenWrt gateway. The upstream foreign path is only marked confirmed when nftables evidence ties DNS traffic to the discovered foreign mark.") {
+                    flowLine(.dns,label:dnsLabel,nodes:[
+                        Node("Home Client",homeLANState,nil),
+                        Node("Xiaomi DNS",model.homeInfrastructure.gateway.dnsServer == true ? model.homeInfrastructure.gateway.state:.unknown,model.homeInfrastructure.gateway.host),
+                        tunnelNode(model.homeInfrastructure.foreignTunnel,fallback:"Foreign Tunnel"),
+                        Node(model.activeNodeName,model.system.health,"Foreign exit"),
+                        Node("Cloudflare DNS",.unknown,model.homeInfrastructure.gateway.upstreamDNS.isEmpty ? "Upstream not observed":model.homeInfrastructure.gateway.upstreamDNS.joined(separator:", "))
+                    ])
+                }
+
+                GroupBox("Discovery evidence") {
+                    Grid(alignment:.leading,horizontalSpacing:16,verticalSpacing:8) {
+                        GridRow { Text("OpenWrt").foregroundStyle(.secondary); Text(model.homeInfrastructure.gateway.evidence ?? "Unknown") }
+                        GridRow { Text("VPS policy").foregroundStyle(.secondary); Text(model.homeInfrastructure.vpsPolicy.evidence ?? "Unknown") }
+                        GridRow { Text("Foreign policy").foregroundStyle(.secondary); Text(foreignLabel) }
+                        GridRow { Text("Remote RU policy").foregroundStyle(.secondary); Text(remoteRULabel) }
+                        GridRow { Text("Management").foregroundStyle(.secondary); Text(managementLabel) }
+                    }.padding(8)
+                }
+            }
+            .padding(24)
+            .frame(maxWidth:1200,alignment:.leading)
+        }
+    }
+
+    @ViewBuilder
+    private func topologySection<Content:View>(_ title:String,_ subtitle:String,@ViewBuilder content:()->Content)->some View{
+        GroupBox {
+            VStack(alignment:.leading,spacing:12) {
+                Text(subtitle).font(.caption).foregroundStyle(.secondary)
+                content()
+            }.padding(8)
+        } label: {
+            Text(title).font(.headline)
+        }
+    }
+
+    private func flowLine(_ kind:InfrastructureFlowKind,label:String,nodes:[Node])->some View{
+        ScrollView(.horizontal,showsIndicators:false) {
+            HStack(spacing:10) {
+                badge(kind,label:label)
+                ForEach(Array(nodes.enumerated()),id:\.offset){index,node in
+                    if index>0 {
+                        Image(systemName:"arrow.right")
+                            .font(.headline)
+                            .foregroundStyle(flowColor(kind))
+                    }
+                    nodeView(node)
+                }
+            }
+            .padding(.vertical,4)
+        }
+    }
+
+    private func nodeView(_ node:Node)->some View{
+        HStack(spacing:8) {
+            StatusDot(state:node.state)
+            VStack(alignment:.leading,spacing:2) {
+                Text(node.title).fontWeight(.semibold).lineLimit(1)
+                if let detail=node.detail,!detail.isEmpty{Text(detail).font(.caption2).foregroundStyle(.secondary).lineLimit(2)}
+            }
+        }
+        .padding(.horizontal,12).padding(.vertical,9)
+        .frame(minWidth:150,alignment:.leading)
+        .background(.quaternary.opacity(0.35),in:RoundedRectangle(cornerRadius:10))
+    }
+
+    private func badge(_ kind:InfrastructureFlowKind,label:String)->some View{
+        Text(label)
+            .font(.caption2.bold())
+            .padding(.horizontal,8).padding(.vertical,5)
+            .foregroundStyle(flowColor(kind))
+            .background(flowColor(kind).opacity(0.12),in:Capsule())
+    }
+
+    private func flowColor(_ kind:InfrastructureFlowKind)->Color{
+        switch kind{
+        case .direct:return .green
+        case .foreign:return .blue
+        case .service:return .orange
+        case .dns:return .purple
+        case .local:return .gray
+        }
+    }
+
+    private var gatewayNode:Node{
+        let gateway=model.homeInfrastructure.gateway
+        return Node("Xiaomi OpenWrt",gateway.state,gateway.lanIPv4 ?? gateway.host)
+    }
+
+    private var uplinkNode:Node{
+        Node("AX18 · Home Uplink",uplinkState,model.home.network?.routerIP)
+    }
+
+    private func tunnelNode(_ tunnel:InfrastructureTunnelSnapshot?,fallback:String)->Node{
+        Node(tunnel?.name ?? fallback,tunnel?.state ?? .unknown,tunnel.map{"\($0.role) · \($0.localAddress ?? "address unknown")"} ?? "Not discovered")
+    }
+
+    private var homeLANState:HealthState{
+        switch model.home.snapshot.mode{case .homeLAN,.remote:return .online;case .other,.unknown:return .unknown}
+    }
+
+    private var uplinkState:HealthState{
+        if model.home.routerState == .connected{return .online}
+        guard let ip=model.home.network?.routerIP,let device=model.home.devices.first(where:{$0.ipv4==ip}) else{return .unknown}
+        switch device.status{case .online:return .online;case .offline:return .offline;case .unknown:return .unknown}
+    }
+
+    private var remoteClientState:HealthState{
+        if model.wireGuard.peers.contains(where:{$0.status == .online}){return .online}
+        return model.wireGuard.peers.isEmpty ? .unknown:.offline
+    }
+
+    private var remoteClientDetail:String{"\(model.wireGuard.peers.filter{$0.status == .online}.count)/\(model.wireGuard.peers.count) peers online"}
+
+    private var directLabel:String{
+        guard model.homeInfrastructure.directPathConfirmed else{return "DIRECT · Unknown"}
+        return "DIRECT · via \(model.homeInfrastructure.gateway.defaultGateway ?? "?")"
+    }
+
+    private var foreignLabel:String{
+        let g=model.homeInfrastructure.gateway
+        guard model.homeInfrastructure.foreignPathConfirmed else{return "FOREIGN · Unknown"}
+        return "FOREIGN · \(g.foreignMark ?? "?") → table \(g.foreignTable ?? "?") → \(g.foreignInterface ?? "?")"
+    }
+
+    private var remoteRULabel:String{
+        let v=model.homeInfrastructure.vpsPolicy
+        guard model.homeInfrastructure.remoteRUPathConfirmed else{return "RU RETURN · Unknown"}
+        return "RU RETURN · \(v.ruMark ?? "?") → table \(v.ruTable ?? "?") → \(v.homeExitInterface ?? "?")"
+    }
+
+    private var managementLabel:String{
+        model.homeInfrastructure.managementPathConfirmed ? "MANAGEMENT · \(model.homeInfrastructure.gateway.managementInterface ?? "?")":"MANAGEMENT · Unknown"
+    }
+
+    private var dnsLabel:String{
+        model.homeInfrastructure.dnsForeignConfirmed ? "DNS · foreign policy confirmed":"DNS · upstream policy Unknown"
+    }
 }
