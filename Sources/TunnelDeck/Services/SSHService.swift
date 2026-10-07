@@ -37,6 +37,46 @@ actor SSHService {
         return try await run(command: command.arguments.map(Self.shellQuote).joined(separator: " "), configuration: configuration, redact: true)
     }
 
+    /// Ephemeral raw SSH console command.
+    ///
+    /// This intentionally bypasses ReadCommand allow-listing because the user
+    /// explicitly opted into the interactive server console. It still validates
+    /// the selected SSH target and redacts known secret material from stdout /
+    /// stderr. Commands are not written to TunnelDeck activity/log history.
+    func executeConsole(
+        _ rawCommand: String,
+        configuration: SSHConfiguration,
+        timeout: Int = 300
+    ) async throws -> CommandResult {
+        try CommandPolicy.validate(
+            host: configuration.host,
+            username: configuration.username,
+            keyPath: configuration.keyPath
+        )
+
+        let command = rawCommand.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard
+            !command.isEmpty,
+            command.utf8.count <= 8_192,
+            !command.contains("\0")
+        else {
+            throw CommandPolicyError.deniedCommand
+        }
+
+        let seconds = max(5, min(timeout, 300))
+
+        let remoteCommand =
+            "/usr/bin/timeout --signal=TERM \(seconds)s /bin/bash -lc " +
+            Self.shellQuote(command)
+
+        return try await run(
+            command: remoteCommand,
+            configuration: configuration,
+            redact: true
+        )
+    }
+
     func executeHelper2(_ command: Helper2Command, configuration: SSHConfiguration) async throws -> CommandResult {
         try CommandPolicy.validate(host: configuration.host, username: configuration.username, keyPath: configuration.keyPath)
         return try await run(command: Helper2CommandPolicy.arguments(for: command).map(Self.shellQuote).joined(separator: " "), configuration: configuration, redact: true)
