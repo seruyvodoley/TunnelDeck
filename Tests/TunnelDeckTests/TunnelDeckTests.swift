@@ -760,11 +760,12 @@ private actor AgentFixtureSource:AgentHistorySource{
     #expect(!TPLinkArcherAX18Provider.allowed(path:"/admin/dhcps?form=client",parameters:["operation":"load","extra":"1"]))
 }
 
-@Test func tpLinkSGStage2UsesAdminForBlankUsernameAndConfirmLoginPayload(){
-    #expect(TPLinkArcherAX18Provider.effectiveUsername(nil)=="admin")
-    #expect(TPLinkArcherAX18Provider.effectiveUsername("")=="admin")
-    #expect(TPLinkArcherAX18Provider.effectiveUsername("   ")=="admin")
-    #expect(TPLinkArcherAX18Provider.effectiveUsername("operator")=="operator")
+@Test func tpLinkSGStage2UsesRouterReportedUsernameAndConfirmLoginPayload(){
+    #expect(TPLinkArcherAX18Provider.effectiveUsername(userInput:nil,routerUsername:"")=="")
+    #expect(TPLinkArcherAX18Provider.effectiveUsername(userInput:"admin",routerUsername:"")=="")
+    #expect(TPLinkArcherAX18Provider.effectiveUsername(userInput:"operator",routerUsername:"router-user")=="router-user")
+    #expect(TPLinkArcherAX18Provider.effectiveUsername(userInput:"operator",routerUsername:nil)=="operator")
+    #expect(TPLinkArcherAX18Provider.effectiveUsername(userInput:"   ",routerUsername:nil)=="")
     #expect(TPLinkArcherAX18Provider.loginPayload(encryptedPassword:"deadbeef")=="operation=login&password=deadbeef&confirm=true")
 }
 
