@@ -1,6 +1,8 @@
-# TunnelDeck 2.2.2
+# TunnelDeck 2.2.3
 
-## TunnelDeck 2.2.2 release notes
+## TunnelDeck 2.2.3 release notes
+
+- Fixed TP-Link Archer AX18 SG L1 S2 session compatibility by sending the browser-compatible Referer and Origin headers used by the router web client/reference implementation.
 
 - Fixed TP-Link SG L1 S2 authentication: PKCS#1 v1.5 password encryption, OAEP login signatures, confirm=true, sysauth cookies and HMAC-SHA256 authenticated reads.
 - Incidents rendering now uses stable identities, lazy cards and bounded timelines to avoid UI stalls during frequent refreshes.

@@ -31,6 +31,7 @@ enum HomeRouterProviderError: LocalizedError, Equatable {
     case invalidAddress
     case authenticationRequired
     case authenticationFailed
+    case authenticationRejected(String)
     case unsupportedFirmware
     case malformedResponse
     case writeOperationRejected
@@ -41,6 +42,7 @@ enum HomeRouterProviderError: LocalizedError, Equatable {
         case .invalidAddress: "Invalid router address."
         case .authenticationRequired: "Router authentication is required."
         case .authenticationFailed: "Router authentication failed."
+        case .authenticationRejected(let reason): "Router authentication rejected: \(reason)."
         case .unsupportedFirmware: "This router firmware protocol is not supported safely."
         case .malformedResponse: "The router returned a malformed response."
         case .writeOperationRejected: "A non-read router operation was rejected before transmission."
@@ -127,7 +129,8 @@ actor TPLinkArcherAX18Provider: RouterClientInventoryProvider {
 
         let config = try await plain(
             path: "/device_config?form=config",
-            body: "operation=read"
+            body: "operation=read",
+            headers: Self.loginHeaders(baseURL: base)
         )
         let certifications = Self.strings(config["certification"])
         guard certifications.contains("SG CLS L1 STAGE2") || certifications.contains("EU CE RED") else {
@@ -135,8 +138,8 @@ actor TPLinkArcherAX18Provider: RouterClientInventoryProvider {
         }
 
         // SG L1 S2 requests these with operation=read in the URL query.
-        let keys = try await plain(path: "/login?form=keys&operation=read", body: "")
-        let auth = try await plain(path: "/login?form=auth&operation=read", body: "")
+        let keys = try await plain(path: "/login?form=keys&operation=read", body: "", headers: [:])
+        let auth = try await plain(path: "/login?form=auth&operation=read", body: "", headers: [:])
 
         guard
             let sequence = Self.int(auth["seq"]),
@@ -169,7 +172,7 @@ actor TPLinkArcherAX18Provider: RouterClientInventoryProvider {
         let loginResponse = try await transport.post(
             url: loginURL,
             body: Self.encryptedBody(sign: sealed.sign, data: sealed.data),
-            headers: [:]
+            headers: Self.loginHeaders(baseURL: base)
         )
 
         let login = try Self.unwrapEncrypted(loginResponse.data, session: session, login: true)
@@ -248,10 +251,12 @@ actor TPLinkArcherAX18Provider: RouterClientInventoryProvider {
         let clear = Self.formString(parameters)
         let sealed = try session.sealRequest(clear)
         let url = try endpoint(baseURL: baseURL, token: token, path: path)
+        var headers = Self.requestHeaders(baseURL: baseURL)
+        headers["Cookie"] = "sysauth=\(sysauth)"
         let response = try await transport.post(
             url: url,
             body: Self.encryptedBody(sign: sealed.sign, data: sealed.data),
-            headers: ["Cookie": "sysauth=\(sysauth)"]
+            headers: headers
         )
         return try Self.unwrapEncrypted(response.data, session: session, login: false)
     }
@@ -270,6 +275,25 @@ actor TPLinkArcherAX18Provider: RouterClientInventoryProvider {
             return false
         }
         return true
+    }
+
+    static func origin(baseURL: URL) -> String {
+        let scheme = baseURL.scheme ?? "http"
+        let host = baseURL.host ?? ""
+        let port = baseURL.port.map { ":\($0)" } ?? ""
+        return "\(scheme)://\(host)\(port)"
+    }
+
+    static func loginHeaders(baseURL: URL) -> [String: String] {
+        ["Referer": "\(origin(baseURL: baseURL))/webpages/index.html"]
+    }
+
+    static func requestHeaders(baseURL: URL) -> [String: String] {
+        let value = origin(baseURL: baseURL)
+        return [
+            "Referer": "\(value)/webpages/index.html",
+            "Origin": value
+        ]
     }
 
     static func effectiveUsername(_ username: String?) -> String {
@@ -293,12 +317,12 @@ actor TPLinkArcherAX18Provider: RouterClientInventoryProvider {
         return cookie.isEmpty ? nil : cookie
     }
 
-    private func plain(path: String, body: String) async throws -> [String: Any] {
+    private func plain(path: String, body: String, headers: [String: String]) async throws -> [String: Any] {
         guard let baseURL else {
             throw HomeRouterProviderError.invalidAddress
         }
         let url = try endpoint(baseURL: baseURL, token: "", path: path)
-        let response = try await transport.post(url: url, body: Data(body.utf8), headers: [:])
+        let response = try await transport.post(url: url, body: Data(body.utf8), headers: headers)
         return try Self.unwrapPlain(response.data)
     }
 
@@ -384,6 +408,9 @@ actor TPLinkArcherAX18Provider: RouterClientInventoryProvider {
         let code = rawCode.lowercased()
         if !login && (code.contains("timeout") || code.contains("permission")) {
             return .authenticationRequired
+        }
+        if login && !rawCode.isEmpty {
+            return .authenticationRejected(rawCode)
         }
         return .authenticationFailed
     }
