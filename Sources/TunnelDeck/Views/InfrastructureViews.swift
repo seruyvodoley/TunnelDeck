@@ -283,6 +283,8 @@ struct DiagnosticsView: View {
                     .disabled(model.isRunningDNSPathTest)
                 }
 
+                ServerConsolePanel()
+
                 GroupBox("Network visibility snapshot") {
                     Grid(alignment: .leading, horizontalSpacing: 20, verticalSpacing: 8) {
                         GridRow { Text("Check").bold(); Text("Expected").bold(); Text("Actual").bold(); Text("Data").bold() }
