@@ -32,9 +32,13 @@ The 2.0 domain is node-scoped: infrastructure nodes, services, endpoints, WireGu
 
 SQLite is the operational source of truth. Migrations use `PRAGMA user_version`, foreign keys, WAL and transactions. Secrets are excluded; SSH key paths and AdGuard credentials remain in Keychain/existing secure storage. Legacy Monitoring JSON is imported with UUID deduplication and retained during compatibility.
 
-Home Access is deliberately separate from the VPS Fleet. Schema v6 stores confirmed Home Network configuration, stable MAC-first device identities, address changes, and 30-day lightweight observations. Local discovery runs only while its screen is active, uses unprivileged ARP/NDP and routing evidence, and never configures the LAN or scans ports. Imported WireGuard profiles remain files under Application Support with directory mode `0700` and file mode `0600`; their private contents never enter SQLite or logs.
+Home Access is deliberately separate from the VPS Fleet. Schema v6 stores confirmed Home Network configuration, stable MAC-first device identities, address changes, and 30-day lightweight observations. ARP/NDP discovery remains unprivileged and never configures the LAN or scans ports. Imported WireGuard profiles remain files under Application Support with directory mode `0700` and file mode `0600`; their private contents never enter SQLite or logs.
 
-Remote discovery remains read-only. Existing writes still require explicit Write Mode and matching helper 1.2.1. Topology, exposure, drift, incidents and alerts never change VPS configuration.
+Home Infrastructure discovery is a session-level evidence snapshot layered on top of Home Access. Every normal discovery refresh can query the current/last-confirmed OpenWrt policy gateway through the same strict SSH transport and query the active VPS for route/rule/tunnel evidence. Only fixed `ReadCommand` cases are permitted. OpenWrt discovery reads system board metadata, routes, rules, selected UCI state, nftables evidence, RU set size and `wg/awg show`; VPS discovery reads routes, rules, td_ru4 count and `wg/awg show`. It never reads WireGuard private keys or mutates UCI, nftables, interfaces, systemd/init or packages.
+
+The topology UI is rebuilt from the latest typed `HomeInfrastructureSnapshot`. The main default route establishes the Home Uplink relation, fwmark→table→default-interface evidence establishes the foreign path, the VPS marked table establishes the remote RU home-exit path, and the route from the OpenWrt gateway to the VPS wg0 subnet establishes the management tunnel. Missing evidence is rendered Unknown.
+
+Remote discovery remains read-only. Existing writes still require explicit Write Mode and matching helper 1.2.1. Topology, exposure, drift, incidents and alerts never change VPS or OpenWrt configuration.
 
 ## Swift application
 

@@ -5,6 +5,7 @@ import SwiftUI
 @MainActor
 final class AppViewModel: ObservableObject {
     lazy var home=HomeAccessController(store:persistenceStore)
+    @Published var homeInfrastructure=HomeInfrastructureSnapshot()
     @Published var settings: AppSettings
     @Published var system = SystemSnapshot()
     @Published var wireGuard = WireGuardSnapshot()
@@ -63,6 +64,7 @@ final class AppViewModel: ObservableObject {
     @Published private(set) var agentCursors = AgentSyncCursors()
 
     let ssh = SSHService()
+    lazy var homeInfrastructureDiscovery=HomeInfrastructureDiscoveryService(ssh:ssh)
     let adGuardAPI = AdGuardAPIService()
     let localDNS = LocalDNSService()
     lazy var helper = HelperService(ssh: ssh)
@@ -115,6 +117,22 @@ final class AppViewModel: ObservableObject {
     }
 
     var configuration: SSHConfiguration { SSHConfiguration(host: settings.host, username: settings.username, keyPath: NSString(string: settings.keyPath).expandingTildeInPath, timeout: 8, port: settings.port) }
+
+    private func openWrtKeyPath()->String{
+        if let stored=KeychainService.load(account:"openwrt-key-path"),!stored.isEmpty{return NSString(string:stored).expandingTildeInPath}
+        let preferred=NSString(string:"~/.ssh/tunneldeck_openwrt_rsa").expandingTildeInPath
+        if FileManager.default.isReadableFile(atPath:preferred){return preferred}
+        return NSString(string:settings.keyPath).expandingTildeInPath
+    }
+
+    private func homeGatewayConfigurations()->[SSHConfiguration]{
+        var hosts:[String]=[]
+        func append(_ value:String?){guard let value=value?.trimmingCharacters(in:.whitespacesAndNewlines),IPv4Validator.isValid(value),!hosts.contains(value) else{return};hosts.append(value)}
+        append(home.snapshot.defaultGateway)
+        append(UserDefaults.standard.string(forKey:"tunneldeck-openwrt-host"))
+        let key=openWrtKeyPath()
+        return hosts.map{SSHConfiguration(host:$0,username:"root",keyPath:key,timeout:4,port:22)}
+    }
     private func captureNodeContext()->NodeOperationContext{let value=nodeOperations.capture(nodeID:activeServerID);return NodeOperationContext(nodeID:value.0,generation:value.1,configuration:configuration,host:settings.host)}
     private func accepts(_ context:NodeOperationContext)->Bool{nodeOperations.accepts(nodeID:context.nodeID,generation:context.generation,activeNodeID:activeServerID)}
 
@@ -152,7 +170,7 @@ final class AppViewModel: ObservableObject {
         guard let server = servers.first(where: { $0.id == id }) else { return }
         nodeOperations.advance();refreshCadence.reset();cpuDeltaTracker.reset();securityOperation.cancel();nodeLoadTask?.cancel();wakeTask?.cancel();agentSyncTask?.cancel();alertSaveTask?.cancel();healthCheckTask?.cancel();healthCheckTask=nil;agentSyncTask=nil;agentSyncToken=nil;refreshToken=nil;healthCheckToken=nil;isRefreshing=false;isRunningHealthCheck=false
         activeServerID = id; UserDefaults.standard.set(id.uuidString, forKey: "activeServerID"); settings.host = server.host; settings.port = server.port; settings.username = server.username; settings.keyPath = server.keyPath;isRefreshingSecurity=false
-        system = SystemSnapshot(); wireGuard = WireGuardSnapshot(); units = []; listeners = []; healthReport = nil; security = SecuritySnapshot(); exposureEndpoints=[];monitoringSamples = []; monitoringEvents = []; peerHistory=[];adGuardHistory=[];incidents=[];alertRules=[];alertStates=[:];alertEvents=[];configurationBaseline=nil;baselineDrift=[];lastPeerHistorySample=nil;lastAdGuardHistorySample=nil;loadServerScopedState()
+        system = SystemSnapshot(); wireGuard = WireGuardSnapshot(); units = []; listeners = []; healthReport = nil; security = SecuritySnapshot(); exposureEndpoints=[];monitoringSamples = []; monitoringEvents = []; peerHistory=[];adGuardHistory=[];incidents=[];alertRules=[];alertStates=[:];alertEvents=[];configurationBaseline=nil;baselineDrift=[];lastPeerHistorySample=nil;lastAdGuardHistorySample=nil;homeInfrastructure.vpsPolicy=VPSPolicySnapshot();homeInfrastructure.vpsTunnels=[];loadServerScopedState()
         saveSettings();nodeLoadTask=Task{[weak self] in guard let self else{return};await self.loadMonitoringHistory();guard !Task.isCancelled else{return};await self.syncAgentHistory();guard !Task.isCancelled else{return};await self.loadMonitoringHistory();await self.loadBaseline();guard !Task.isCancelled else{return};await self.refresh()}
         updateFleet()
     }
@@ -200,6 +218,7 @@ final class AppViewModel: ObservableObject {
         let discoveryDue=refreshCadence.shouldRun("discovery",every:60)
         refreshToken=token;isRefreshing = true; defer { if refreshToken==token{isRefreshing=false;refreshToken=nil} }
         system.macLANIP = LocalNetworkService.lanIPv4()
+        if discoveryDue{await home.refresh()}
         async let hostname = execute(.hostname, subsystem: "System", configuration:capturedConfiguration)
         async let cpu = execute(.cpu, subsystem: "System", configuration:capturedConfiguration)
         let cachedMacPublicIP=system.macPublicIP
@@ -237,6 +256,12 @@ final class AppViewModel: ObservableObject {
         wireGuard = WireGuardParser.parse(values.8.stdout, timeout: settings.handshakeTimeout)
         if !discoveryDue{wireGuard.address=cachedWGAddress;wireGuard.mtu=cachedWGMTU}
         if discoveryDue{wireGuard.address=parseWireGuardAddress(values.9.stdout);if let mtuRange=values.10.stdout.range(of:#"mtu\s+(\d+)"#,options:.regularExpression){wireGuard.mtu=values.10.stdout[mtuRange].split(separator:" ").last.map(String.init) ?? "—"};units=SystemctlParser.parse(values.11.stdout);listeners=SSParser.parse(values.12.stdout);antiZapretSettings=Dictionary(uniqueKeysWithValues:values.13.stdout.split(separator:"\n").compactMap{line in let pair=line.split(separator:"=",maxSplits:1).map(String.init);return pair.count==2 ? (pair[0],pair[1]):nil});profiles=ProfileParser.parseListing(values.14.stdout)}
+        if discoveryDue{
+            let discovered=await homeInfrastructureDiscovery.discover(vpsConfiguration:capturedConfiguration,gatewayConfigurations:homeGatewayConfigurations(),homeNetwork:home.network,homeDeviceCount:home.devices.count,handshakeTimeout:settings.handshakeTimeout)
+            guard !isMacSleeping,accepts(context),refreshToken==token else{return}
+            homeInfrastructure=discovered
+            if let host=discovered.gateway.host,discovered.gateway.state == .online{UserDefaults.standard.set(host,forKey:"tunneldeck-openwrt-host")}
+        }
         lastRefresh = Date();lastRefreshDuration=Date().timeIntervalSince(start);statusMessage = values.0.succeeded ? "Updated" : "SSH unavailable"; updateFleet()
         if values.0.succeeded,refreshCadence.shouldRun("helper-api",every:60) { await refreshHelper(); await sampleAdGuardHistoryIfNeeded() }
         guard accepts(context),refreshToken==token,!Task.isCancelled else{return}
