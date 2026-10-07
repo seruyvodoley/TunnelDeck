@@ -31,6 +31,7 @@ enum HomeRouterProviderError: LocalizedError, Equatable {
     case invalidAddress
     case authenticationRequired
     case authenticationFailed
+    case authenticationRejected(String)
     case unsupportedFirmware
     case malformedResponse
     case writeOperationRejected
@@ -41,6 +42,7 @@ enum HomeRouterProviderError: LocalizedError, Equatable {
         case .invalidAddress: "Invalid router address."
         case .authenticationRequired: "Router authentication is required."
         case .authenticationFailed: "Router authentication failed."
+        case .authenticationRejected(let reason): "Router authentication rejected: \(reason)."
         case .unsupportedFirmware: "This router firmware protocol is not supported safely."
         case .malformedResponse: "The router returned a malformed response."
         case .writeOperationRejected: "A non-read router operation was rejected before transmission."
@@ -406,6 +408,9 @@ actor TPLinkArcherAX18Provider: RouterClientInventoryProvider {
         let code = rawCode.lowercased()
         if !login && (code.contains("timeout") || code.contains("permission")) {
             return .authenticationRequired
+        }
+        if login && !rawCode.isEmpty {
+            return .authenticationRejected(rawCode)
         }
         return .authenticationFailed
     }
