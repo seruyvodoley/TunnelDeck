@@ -188,7 +188,7 @@ enum HomeInfrastructureParser{
             let peer=parsed.peers.first
             let local=interfaceAddress(name,in:interfaces)
             let state:HealthState
-            if let peer{state=peer.latestHandshake == nil ? .warning:peer.status}else{state=.online}
+            if let peer { state = peer.latestHandshake == nil ? .warning : peer.status } else { state = .online }
             result.append(InfrastructureTunnelSnapshot(name:name,role:"Discovered Tunnel",transport:transport,localAddress:local,peerAddress:peerAddress(from:local,allowed:peer?.vpnIP),endpoint:peer?.endpoint=="—" ? nil:peer?.endpoint,listenPort:Int(parsed.listenPort),mtu:linkMTU(name,in:links),latestHandshake:peer?.latestHandshake,receivedBytes:parsed.receivedBytes,sentBytes:parsed.sentBytes,state:state,observedOn:[observedOn],evidence:"\(transport) interface observed by \(observedOn) SSH"))
         }
         if commandSucceeded{
