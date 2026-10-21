@@ -216,9 +216,9 @@ final class AppViewModel: ObservableObject {
         guard !isRefreshing else { return }
         let context=captureNodeContext(),token=UUID(),capturedConfiguration=context.configuration,start=Date()
         let discoveryDue=refreshCadence.shouldRun("discovery",every:60)
+        let localDiscoveryTask: Task<Void,Never>? = discoveryDue ? Task { await home.refresh() } : nil
         refreshToken=token;isRefreshing = true; defer { if refreshToken==token{isRefreshing=false;refreshToken=nil} }
         system.macLANIP = LocalNetworkService.lanIPv4()
-        if discoveryDue{await home.refresh()}
         async let hostname = execute(.hostname, subsystem: "System", configuration:capturedConfiguration)
         async let cpu = execute(.cpu, subsystem: "System", configuration:capturedConfiguration)
         let cachedMacPublicIP=system.macPublicIP
@@ -256,13 +256,14 @@ final class AppViewModel: ObservableObject {
         wireGuard = WireGuardParser.parse(values.8.stdout, timeout: settings.handshakeTimeout)
         if !discoveryDue{wireGuard.address=cachedWGAddress;wireGuard.mtu=cachedWGMTU}
         if discoveryDue{wireGuard.address=parseWireGuardAddress(values.9.stdout);if let mtuRange=values.10.stdout.range(of:#"mtu\s+(\d+)"#,options:.regularExpression){wireGuard.mtu=values.10.stdout[mtuRange].split(separator:" ").last.map(String.init) ?? "—"};units=SystemctlParser.parse(values.11.stdout);listeners=SSParser.parse(values.12.stdout);antiZapretSettings=Dictionary(uniqueKeysWithValues:values.13.stdout.split(separator:"\n").compactMap{line in let pair=line.split(separator:"=",maxSplits:1).map(String.init);return pair.count==2 ? (pair[0],pair[1]):nil});profiles=ProfileParser.parseListing(values.14.stdout)}
+        lastRefresh = Date();lastRefreshDuration=Date().timeIntervalSince(start);statusMessage = values.0.succeeded ? "Updated" : "SSH unavailable"; updateFleet()
         if discoveryDue{
+            await localDiscoveryTask?.value
             let discovered=await homeInfrastructureDiscovery.discover(vpsConfiguration:capturedConfiguration,gatewayConfigurations:homeGatewayConfigurations(),homeNetwork:home.network,homeDeviceCount:home.devices.count,handshakeTimeout:settings.handshakeTimeout)
             guard !isMacSleeping,accepts(context),refreshToken==token else{return}
             homeInfrastructure=discovered
             if let host=discovered.gateway.host,discovered.gateway.state == .online{UserDefaults.standard.set(host,forKey:"tunneldeck-openwrt-host")}
         }
-        lastRefresh = Date();lastRefreshDuration=Date().timeIntervalSince(start);statusMessage = values.0.succeeded ? "Updated" : "SSH unavailable"; updateFleet()
         if values.0.succeeded,refreshCadence.shouldRun("helper-api",every:60) { await refreshHelper(); await sampleAdGuardHistoryIfNeeded() }
         guard accepts(context),refreshToken==token,!Task.isCancelled else{return}
         await recordMonitoringState(context:context)
@@ -726,7 +727,7 @@ final class AppViewModel: ObservableObject {
     }
 
     var activeNodeName: String { servers.first(where: { $0.id == activeServerID })?.name ?? (system.hostname == "—" ? "VPS" : system.hostname) }
-    func updateFleet() { if let id=activeServerID,let sample=monitoringSamples.last,sample.nodeID==id{assert(sample.nodeID==id);lastKnownSamples[id]=sample};fleetSummaries = fleetController.summaries(profiles: servers, activeID: activeServerID, system: system, wireGuard: wireGuard, units: units, security: security, incidents: incidents, lastKnownSamples:lastKnownSamples) }
+    func updateFleet() { if let id=activeServerID,let sample=monitoringSamples.last,sample.nodeID==id{assert(sample.nodeID==id);lastKnownSamples[id]=sample};fleetSummaries = fleetController.summaries(profiles: servers, activeID: activeServerID, activeLastObservedAt:lastRefresh, staleAfter:max(settings.pollingInterval*3,120), system: system, wireGuard: wireGuard, units: units, security: security, incidents: incidents, lastKnownSamples:lastKnownSamples) }
     func exposureName(_ endpoint: NetworkEndpoint) -> String { ExposureAnalyzer.displayName(endpoint, listeners: listeners) }
     private func currentBaseline(_ nodeID: UUID) -> ConfigurationBaseline { BaselineEngine.capture(nodeID: nodeID, endpoints: exposureEndpoints, units: units, wireGuard: wireGuard, ssh: security.ssh, hashes: currentConfigurationHashes) }
     func setCurrentBaseline() async { guard let nodeID=activeServerID else{return};let context=nodeOperations.capture(nodeID:nodeID),baseline=currentBaseline(nodeID);do{if let profile=servers.first(where:{$0.id==nodeID}),let persistenceStore{try await persistenceStore.upsert(node:LegacyModelAdapter.node(from:profile));try await persistenceStore.save(baseline:baseline)};guard nodeOperations.accepts(nodeID:nodeID,generation:context.1,activeNodeID:activeServerID)else{return};configurationBaseline=baseline;baselineDrift=[];persistenceErrorMessage=nil;evaluateAlerts()}catch{if nodeOperations.accepts(nodeID:nodeID,generation:context.1,activeNodeID:activeServerID){persistenceErrorMessage=SecretRedactor.redact(error.localizedDescription)}} }
