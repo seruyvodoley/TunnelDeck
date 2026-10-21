@@ -9,6 +9,15 @@ struct AdGuardQueryEntry: Identifiable, Sendable, Hashable {
     let rule: String
 }
 
+struct AdGuardFilterSnapshot: Identifiable, Sendable, Hashable {
+    var id: String { url.isEmpty ? name : url }
+    let name: String
+    let url: String
+    let enabled: Bool
+    let rulesCount: Int
+    let lastUpdated: String
+}
+
 struct AdGuardSnapshot: Sendable {
     var available = false
     var version = "—"
@@ -18,7 +27,7 @@ struct AdGuardSnapshot: Sendable {
     var topQueried: [String] = []
     var topBlocked: [String] = []
     var topClients: [String] = []
-    var filters: [String] = []
+    var filters: [AdGuardFilterSnapshot] = []
     var queryLog: [AdGuardQueryEntry] = []
     var lastUpdated: Date?
     var error: String?
@@ -46,7 +55,16 @@ actor AdGuardAPIService {
             snapshot.topClients = Self.names(stats["top_clients"])
 
             let filtering = try await json(path: "/control/filtering/status", baseURL: baseURL, username: username, password: password)
-            snapshot.filters = (filtering["filters"] as? [[String: Any]] ?? []).compactMap { $0["name"] as? String }
+            snapshot.filters = (filtering["filters"] as? [[String: Any]] ?? []).compactMap { filter in
+                guard let name = filter["name"] as? String else { return nil }
+                return AdGuardFilterSnapshot(
+                    name: name,
+                    url: filter["url"] as? String ?? "",
+                    enabled: filter["enabled"] as? Bool ?? false,
+                    rulesCount: Self.intValue(filter["rules_count"]),
+                    lastUpdated: filter["last_updated"] as? String ?? ""
+                )
+            }
 
             let log = try await json(path: "/control/querylog", baseURL: baseURL, username: username, password: password)
             snapshot.queryLog = Self.parseQueryLog(log)

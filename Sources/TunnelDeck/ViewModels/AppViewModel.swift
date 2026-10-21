@@ -41,6 +41,8 @@ final class AppViewModel: ObservableObject {
     @Published var adGuard = AdGuardSnapshot()
     @Published var dnsPath = DNSPathSnapshot()
     @Published var isRunningDNSPathTest = false
+    @Published var networkHealth = NetworkHealthSnapshot(checkedAt: .distantPast, host: "Not checked", probes: [])
+    @Published var isRunningNetworkHealth = false
     @Published var security = SecuritySnapshot()
     @Published var isRefreshingSecurity = false
     @Published var monitoringSamples: [MonitoringSample] = []
@@ -749,6 +751,20 @@ final class AppViewModel: ObservableObject {
         let result = await execute(command, subsystem: "Diagnostics")
         let diagnostic = DiagnosticResult(id: UUID(), date: Date(), name: name, success: result.succeeded, summary: (result.stdout.nonEmpty ?? result.stderr).trimmingCharacters(in: .whitespacesAndNewlines), milliseconds: result.duration * 1000)
         diagnostics.append(diagnostic);if diagnostics.count>500{diagnostics.removeFirst(diagnostics.count-500)};await history.append(diagnostic)
+    }
+
+    func runNetworkHealthProbe() async {
+        guard !isRunningNetworkHealth else { return }
+        isRunningNetworkHealth = true
+        defer { isRunningNetworkHealth = false }
+        let result = await execute(.networkHealthVPS, subsystem: "Network Health")
+        networkHealth = NetworkHealthSnapshot.parse(result.stdout, succeeded: result.succeeded)
+        let failed = networkHealth.probes.filter { $0.state == .failed || $0.state == .warning }
+        let passed = networkHealth.probes.filter { $0.state == .passed }.count
+        let summary = "\(passed) passed, \(failed.count) require review · \(networkHealth.host)"
+        let entry = DiagnosticResult(id: UUID(), date: networkHealth.checkedAt, name: "VPS Network Health", success: failed.isEmpty && passed > 0, summary: summary, milliseconds: result.duration * 1000)
+        await history.append(entry)
+        diagnostics = await history.load()
     }
 
     func execute(_ command: ReadCommand, subsystem: String, configuration: SSHConfiguration? = nil) async -> CommandResult {

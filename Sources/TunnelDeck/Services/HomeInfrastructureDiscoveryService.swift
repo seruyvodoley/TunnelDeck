@@ -106,6 +106,9 @@ enum HomeInfrastructureParser{
         }
         gateway.ruPrefixCount=countNFTElements(sections["RU4"] ?? "")
         gateway.nftEvidence=(sections["NFT_HINTS"] ?? "").split(separator:"\n").map(String.init)
+        let dnsEnforcement = sections["DNS_ENFORCEMENT"] ?? ""
+        gateway.forceDNSRedirect = dnsEnforcement.contains("TunnelDeck force LAN DNS")
+        gateway.encryptedDNSBlocked = dnsEnforcement.contains("TunnelDeck block encrypted DNS")
         gateway.directExceptions=parseDirectExceptions(sections["DIRECT"] ?? "")
         gateway.scripts=(sections["SCRIPTS"] ?? "").split(separator:"\n").map(String.init).filter{!$0.isEmpty}
 

@@ -43,6 +43,8 @@ struct OpenWrtGatewaySnapshot:Sendable,Equatable{
     var dhcpServer:Bool?
     var dnsServer:Bool?
     var upstreamDNS:[String]=[]
+    var forceDNSRedirect:Bool?
+    var encryptedDNSBlocked:Bool?
     var filterAAAA:Bool?
     var ipv4Forwarding:Bool?
     var ruPrefixCount:Int?

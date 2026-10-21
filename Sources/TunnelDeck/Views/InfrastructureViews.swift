@@ -140,11 +140,46 @@ struct DNSView: View {
                     listCard("Top clients", model.adGuard.topClients)
                 }
 
-                MetricCard(title: "Filters", icon: "line.3.horizontal.decrease.circle") {
+                MetricCard(title: "Home DNS filtering", icon: "shield.lefthalf.filled") {
+                    let gateway = model.homeInfrastructure.gateway
+                    let adGuardAddress = "10.66.66.1"
+                    let routerUsesAdGuard = gateway.upstreamDNS.contains(adGuardAddress)
+                    let enabledFilters = model.adGuard.filters.filter(\.enabled)
+                    let activeRules = enabledFilters.reduce(0) { $0 + $1.rulesCount }
+                    VStack(alignment: .leading, spacing: 9) {
+                        HStack {
+                            StatusDot(state: routerUsesAdGuard && model.adGuard.available ? .online : .warning)
+                            Text(routerUsesAdGuard ? "Router upstream points to AdGuard" : "Router upstream does not point to AdGuard")
+                                .fontWeight(.semibold)
+                        }
+                        KeyValueRow(key: "OpenWrt upstream", value: gateway.upstreamDNS.isEmpty ? "Unknown" : gateway.upstreamDNS.joined(separator: ", "))
+                        KeyValueRow(key: "Forced LAN DNS", value: gateway.forceDNSRedirect.map { $0 ? "Active · nftables" : "Not active" } ?? "Unknown")
+                        KeyValueRow(key: "Encrypted DNS :853", value: gateway.encryptedDNSBlocked.map { $0 ? "Blocked · nftables" : "Not blocked" } ?? "Unknown")
+                        KeyValueRow(key: "AdGuard API", value: model.adGuard.available ? "Available · v\(model.adGuard.version)" : "Unavailable")
+                        KeyValueRow(key: "Enabled lists / rules", value: "\(enabledFilters.count) lists · \(activeRules.formatted()) rules")
+                        Text("This confirms router configuration and AdGuard policy. The DNS Path Test below checks a live blocking result from this Mac. DNS filtering cannot remove ads served from the same domain as site content.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+
+                MetricCard(title: "Ad blocking filters", icon: "line.3.horizontal.decrease.circle") {
                     if model.adGuard.filters.isEmpty {
-                        Text("No active filters reported").foregroundStyle(.secondary)
+                        Text("No filters reported by AdGuard API").foregroundStyle(.secondary)
                     } else {
-                        Text(model.adGuard.filters.joined(separator: " · ")).textSelection(.enabled)
+                        VStack(alignment: .leading, spacing: 8) {
+                            ForEach(model.adGuard.filters) { filter in
+                                HStack(alignment: .firstTextBaseline) {
+                                    StatusDot(state: filter.enabled ? .online : .offline)
+                                    Text(filter.name).fontWeight(.medium)
+                                    Spacer()
+                                    Text(filter.enabled ? "\(filter.rulesCount.formatted()) rules" : "Disabled")
+                                        .foregroundStyle(.secondary)
+                                }
+                                if !filter.lastUpdated.isEmpty {
+                                    Text("Updated \(filter.lastUpdated)").font(.caption).foregroundStyle(.secondary).padding(.leading, 21)
+                                }
+                            }
+                        }
                     }
                 }
 
@@ -281,6 +316,41 @@ struct DiagnosticsView: View {
                         Task { await model.runDNSPathTest() }
                     }
                     .disabled(model.isRunningDNSPathTest)
+                }
+                HStack {
+                    Button(model.isRunningNetworkHealth ? "Checking VPS…" : "Run VPS Network Health") {
+                        Task { await model.runNetworkHealthProbe() }
+                    }
+                    .disabled(model.isRunningNetworkHealth)
+                    Text("Read-only server probes · no route or service changes").font(.caption).foregroundStyle(.secondary)
+                }
+
+                GroupBox("Network Health · VPS read-only probes") {
+                    VStack(alignment: .leading, spacing: 9) {
+                        if model.networkHealth.probes.isEmpty {
+                            Text("Run the probe to check the VPS default route, RU policy lookup, DNS, HTTPS, Xray listener, Caddy container and resource headroom.")
+                                .foregroundStyle(.secondary)
+                        } else {
+                            HStack {
+                                Text(model.networkHealth.host).fontWeight(.semibold)
+                                Spacer()
+                                Text(model.networkHealth.checkedAt.formatted(date: .abbreviated, time: .standard))
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                            ForEach(model.networkHealth.probes) { probe in
+                                HStack(alignment: .top, spacing: 8) {
+                                    StatusDot(state: probe.state == .passed ? .online : probe.state == .failed ? .offline : probe.state == .warning ? .warning : .unknown)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(probe.title).fontWeight(.medium)
+                                        Text(probe.detail).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                                    }
+                                }
+                            }
+                            Text("These probes originate on the VPS. Route lookup is simulated and does not inject packets. They do not confirm home-router forwarding or an active client REALITY session.")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                    .padding(8)
                 }
 
                 GroupBox("Network visibility snapshot") {
