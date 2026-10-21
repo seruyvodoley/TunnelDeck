@@ -69,6 +69,16 @@ import Testing
     {"hostname":"TunnelDeck-Gateway","model":"Xiaomi Mi Router 4C","release":{"description":"OpenWrt 25.12.5"}}
     __TD_UPTIME__
     04:00:00 up 1 day
+    __TD_RESOURCES__
+    cpu_model=MIPS 24KEc V5.5
+    memory_total_kb=58004
+    memory_available_kb=14980
+    overlay_available_kb=7168
+    __TD_REALITY_CLIENTS__
+    xray_installed=false
+    xray_running=false
+    sing-box_installed=false
+    sing-box_running=false
     __TD_INTERFACES__
     br-lan           UP             192.168.0.2/24
     warp0            UNKNOWN        10.68.0.2/30
@@ -139,6 +149,14 @@ import Testing
     #expect(open.gateway.hostname=="TunnelDeck-Gateway")
     #expect(open.gateway.model=="Xiaomi Mi Router 4C")
     #expect(open.gateway.version=="OpenWrt 25.12.5")
+    #expect(open.gateway.cpuModel=="MIPS 24KEc V5.5")
+    #expect(open.gateway.memoryTotalKB==58004)
+    #expect(open.gateway.memoryAvailableKB==14980)
+    #expect(open.gateway.overlayAvailableKB==7168)
+    #expect(open.gateway.xrayClientInstalled==false)
+    #expect(open.gateway.xrayClientRunning==false)
+    #expect(open.gateway.singBoxClientInstalled==false)
+    #expect(open.gateway.singBoxClientRunning==false)
     #expect(open.gateway.lanIPv4=="192.168.0.2/24")
     #expect(open.gateway.defaultGateway=="192.168.0.1")
     #expect(open.gateway.defaultInterface=="br-lan")

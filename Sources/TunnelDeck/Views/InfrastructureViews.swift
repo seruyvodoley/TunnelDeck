@@ -435,6 +435,22 @@ struct RouterView: View {
                     }
                 }
 
+                MetricCard(title:"Home VPN Transport",icon:"point.3.connected.trianglepath.dotted") {
+                    let gateway=model.homeInfrastructure.gateway
+                    let activeTunnel=model.homeInfrastructure.foreignTunnel
+                    VStack(spacing:10) {
+                        HStack { StatusDot(state:model.homeInfrastructure.foreignPathConfirmed ? (activeTunnel?.state ?? .unknown):.unknown); Text("Current home path").font(.headline); Spacer() }
+                        KeyValueRow(key:"Selected foreign transport",value:activeTunnel.map{"\($0.transport) · \($0.name)"} ?? gateway.foreignInterface ?? "Unknown")
+                        KeyValueRow(key:"AmneziaWG",value:gateway.foreignInterface?.localizedCaseInsensitiveContains("awg") == true ? (activeTunnel?.state.rawValue.capitalized ?? "Observed") : "Not selected by the discovered route")
+                        KeyValueRow(key:"Client core on Xiaomi (audit only)",value:realityClientLabel(xrayInstalled:gateway.xrayClientInstalled,xrayRunning:gateway.xrayClientRunning,singBoxInstalled:gateway.singBoxClientInstalled,singBoxRunning:gateway.singBoxClientRunning))
+                        KeyValueRow(key:"VPS Xray server",value:model.homeInfrastructure.xrayService.state == .online ? "Active · TCP \(model.homeInfrastructure.xrayService.tcpPort)" : model.homeInfrastructure.xrayService.state.rawValue.capitalized)
+                        KeyValueRow(key:"CPU / RAM",value:"\(gateway.cpuModel ?? "Unknown CPU") · \(memoryText(gateway.memoryAvailableKB)) available of \(memoryText(gateway.memoryTotalKB))")
+                        KeyValueRow(key:"Overlay free",value:memoryText(gateway.overlayAvailableKB))
+                        KeyValueRow(key:"RU address set",value:gateway.ruPrefixCount.map{"\($0) prefixes observed"} ?? "Unknown")
+                        Text("No home REALITY gateway is configured. VPS Xray status confirms only the server endpoint; it does not show that home devices use REALITY. The discovered home route remains on its current transport.").font(.caption).foregroundStyle(.secondary).frame(maxWidth:.infinity,alignment:.leading)
+                    }
+                }
+
                 MetricCard(title:"VPS Remote RU Policy",icon:"arrow.uturn.backward.circle") {
                     let policy=model.homeInfrastructure.vpsPolicy
                     VStack(spacing:10) {
@@ -527,6 +543,19 @@ struct RouterView: View {
     }
 
     private func boolText(_ value:Bool?)->String{value.map{$0 ? "Active":"Inactive"} ?? "Unknown"}
+
+    private func memoryText(_ kilobytes:Int?)->String{
+        guard let kilobytes else{return "Unknown"}
+        return ByteCountFormatter.string(fromByteCount:Int64(kilobytes)*1024,countStyle:.memory)
+    }
+
+    private func realityClientLabel(xrayInstalled:Bool?,xrayRunning:Bool?,singBoxInstalled:Bool?,singBoxRunning:Bool?)->String{
+        if xrayRunning == true{return "Xray process detected · connection not confirmed"}
+        if singBoxRunning == true{return "sing-box process detected · connection not confirmed"}
+        if xrayInstalled == false && singBoxInstalled == false{return "Xray and sing-box not installed"}
+        if xrayInstalled == true || singBoxInstalled == true{return "Client installed but not running"}
+        return "Not discovered"
+    }
 
     private func deviceName(_ ip:String)->String{
         model.home.devices.first(where:{$0.ipv4==ip})?.displayName ?? "Observed rule"

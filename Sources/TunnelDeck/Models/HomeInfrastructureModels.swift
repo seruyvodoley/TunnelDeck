@@ -28,6 +28,14 @@ struct OpenWrtGatewaySnapshot:Sendable,Equatable{
     var hostname:String?
     var model:String?
     var version:String?
+    var cpuModel:String?
+    var memoryTotalKB:Int?
+    var memoryAvailableKB:Int?
+    var overlayAvailableKB:Int?
+    var xrayClientInstalled:Bool?
+    var xrayClientRunning:Bool?
+    var singBoxClientInstalled:Bool?
+    var singBoxClientRunning:Bool?
     var uptime:String?
     var lanIPv4:String?
     var defaultGateway:String?

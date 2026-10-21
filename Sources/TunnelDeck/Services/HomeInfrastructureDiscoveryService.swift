@@ -81,6 +81,16 @@ enum HomeInfrastructureParser{
                 }
             }
         }
+        let resources=parseKeyValues(sections["RESOURCES"] ?? "")
+        gateway.cpuModel=resources["cpu_model"]?.nonEmptyValue
+        gateway.memoryTotalKB=resources["memory_total_kb"].flatMap(Int.init)
+        gateway.memoryAvailableKB=resources["memory_available_kb"].flatMap(Int.init)
+        gateway.overlayAvailableKB=resources["overlay_available_kb"].flatMap(Int.init)
+        let clients=parseKeyValues(sections["REALITY_CLIENTS"] ?? "")
+        gateway.xrayClientInstalled=parseOptionalBool(clients["xray_installed"])
+        gateway.xrayClientRunning=parseOptionalBool(clients["xray_running"])
+        gateway.singBoxClientInstalled=parseOptionalBool(clients["sing-box_installed"])
+        gateway.singBoxClientRunning=parseOptionalBool(clients["sing-box_running"])
         gateway.uptime=sections["UPTIME"]?.nonEmptyValue
         gateway.lanIPv4=interfaceAddress("br-lan",in:sections["INTERFACES"] ?? "")
         let mainDefault=parseDefaultRoute(sections["ROUTES"] ?? "",preferredTable:nil)
@@ -189,15 +199,19 @@ enum HomeInfrastructureParser{
     }
 
     private static func parseDHCP(_ text:String,into gateway:inout OpenWrtGatewaySnapshot){
-        let values=Dictionary(uniqueKeysWithValues:text.split(separator:"\n").compactMap{raw->(String,String)? in
-            let pair=raw.split(separator:"=",maxSplits:1,omittingEmptySubsequences:false)
-            guard pair.count==2 else{return nil};return(String(pair[0]),String(pair[1]))
-        })
+        let values=parseKeyValues(text)
         let dnsmasq=values["dnsmasq"]=="active"
         gateway.dhcpServer=dnsmasq && values["ignore"] != "1"
         gateway.dnsServer=dnsmasq
         gateway.filterAAAA=parseBool(values["filter_aaaa"])
         gateway.upstreamDNS=(values["servers"] ?? "").split(whereSeparator:{ $0==" " || $0=="," }).map(String.init).filter{IPv4Validator.isValid($0)}
+    }
+
+    private static func parseKeyValues(_ text:String)->[String:String]{
+        Dictionary(uniqueKeysWithValues:text.split(separator:"\n").compactMap{raw->(String,String)? in
+            let pair=raw.split(separator:"=",maxSplits:1,omittingEmptySubsequences:false)
+            guard pair.count==2 else{return nil};return(String(pair[0]),String(pair[1]))
+        })
     }
 
     private static func parseTunnels(_ text:String,transport:String,interfaces:String,links:String,commandSucceeded:Bool,observedOn:String,now:Date,handshakeTimeout:TimeInterval)->[InfrastructureTunnelSnapshot]{
@@ -306,6 +320,10 @@ enum HomeInfrastructureParser{
         if ["1","true","yes","active","on"].contains(value){return true}
         if ["0","false","no","inactive","off"].contains(value){return false}
         return nil
+    }
+
+    private static func parseOptionalBool(_ value:String?)->Bool?{
+        switch value?.lowercased(){case "true","1","yes":true;case "false","0","no":false;default:nil}
     }
 
     private static func value(after key:String,tokens:[String])->String?{
