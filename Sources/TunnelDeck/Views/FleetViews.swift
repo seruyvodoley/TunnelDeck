@@ -90,15 +90,13 @@ struct TopologyView: View {
                     ])
                 }
 
-                if model.homeInfrastructure.xrayService.observedAt != nil {
-                    topologySection("VLESS + REALITY","Xray status is based on systemd state and the TCP listener. Client handshake and end-to-end egress are shown as unverified until probed.") {
-                        flowLine(.service,label:"VLESS/TCP",nodes:[
-                            Node("Remote VLESS client",.unknown,"Client handshake not probed"),
-                            Node("Xray · REALITY",model.homeInfrastructure.xrayService.state,xrayDetail),
-                            xrayEgressNode,
-                            Node("External egress",.unknown,"Not probed end to end")
-                        ])
-                    }
+                topologySection("VLESS + REALITY","TunnelDeck monitors the server. It does not start a client tunnel; use a VLESS + REALITY client with the private profile. Client sessions are not exposed by the current Xray telemetry.") {
+                    flowLine(.service,label:"VLESS/TCP",nodes:[
+                        Node("Remote VLESS client",.unknown,"Active client session is not observable here"),
+                        Node("Xray · REALITY",model.homeInfrastructure.xrayService.state,xrayDetail),
+                        model.homeInfrastructure.xrayService.observedAt == nil ? Node("Policy egress",.unknown,"Waiting for VPS discovery") : xrayEgressNode,
+                        Node("External egress",.unknown,"Not probed end to end")
+                    ])
                 }
 
                 topologySection("Discovered network components","Every interface returned by WireGuard and AmneziaWG discovery is listed here. Newly observed interfaces appear automatically after refresh.") {

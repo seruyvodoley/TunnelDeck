@@ -278,6 +278,7 @@ enum HomeInfrastructureParser{
     }
 
     private static func countNFTElements(_ text:String)->Int?{
+        if let count=Int(text.trimmingCharacters(in:.whitespacesAndNewlines)){return count}
         guard text.contains("set ") else{return nil}
         guard let start=text.range(of:"elements = {") else{return 0}
         let tail=text[start.upperBound...]
