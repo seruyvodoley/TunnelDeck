@@ -36,6 +36,7 @@ import Testing
     #expect(snapshot.probes.first(where: { $0.id == "https" })?.state == .passed)
     #expect(snapshot.probes.first(where: { $0.id == "xray" })?.state == .passed)
     #expect(snapshot.probes.first(where: { $0.id == "caddy" })?.state == .passed)
+    #expect(snapshot.probes.first(where: { $0.id == "resources" })?.state == .warning)
     #expect(snapshot.probes.first(where: { $0.id == "xray" })?.detail.contains("does not prove a client REALITY session") == true)
     #expect(snapshot.probes.first(where: { $0.id == "ru-policy" })?.detail.contains("no packet injected") == true)
 }

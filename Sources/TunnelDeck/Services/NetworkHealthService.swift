@@ -67,8 +67,8 @@ struct NetworkHealthSnapshot: Sendable {
     }
 
     private static func keyValues(_ text: String) -> [String: String] {
-        Dictionary(uniqueKeysWithValues: text.split(separator: "\n").compactMap { line in
-            let pair = line.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+        Dictionary(uniqueKeysWithValues: text.split(whereSeparator: \.isWhitespace).compactMap { token in
+            let pair = token.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
             guard pair.count == 2 else { return nil }
             return (String(pair[0]), String(pair[1]))
         })

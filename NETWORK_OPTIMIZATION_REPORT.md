@@ -42,7 +42,7 @@ No changes were made on the VPS, Xiaomi, or AX18. Existing `wg0`, `awgtd0`, `hom
 ## Tests and measurements
 
 - Before edits: `swift test` passed all 80 existing tests.
-- After edits: `swift test` passed all 83 tests. Three new parser tests cover a successful route/DNS/HTTPS/Xray/Caddy sample, failed probes, and SSH failure.
+- After edits: `swift test` passed all 83 tests. Three new parser tests cover a successful route/DNS/HTTPS/Xray/Caddy sample, failed probes, and SSH failure. `swift build -c release` also succeeded.
 - A live, read-only execution of the same server probe returned: default route via `ens3`; mark `0x67` route via `homeexit`/table 167; DNS answer present; HTTPS 200 with TLS in about 37 ms and total about 52 ms; Xray active/listening on 8443; Caddy container running; resource state as above.
 - A separate HTTPS request to Caddy's configured hostname returned 404 after a successful TLS handshake. It is a server-side configured-host check, not a REALITY test.
 - No before/after speed benchmark was run. No throughput, jitter, packet-loss, or bandwidth claim is made. The checks are single bounded probes and do not load-test Xiaomi or the Internet link.
