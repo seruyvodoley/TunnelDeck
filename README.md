@@ -10,6 +10,8 @@
 - The foreign transport and policy interface names are derived from live route/rule evidence; they are not assumed to be named awgtd0.
 - Missing SSH, route, rule, handshake or nftables evidence stays Unknown rather than being synthesized as Online.
 - Home infrastructure discovery reuses the existing SSH safety boundary. It prefers ~/.ssh/tunneldeck_openwrt_rsa for OpenWrt when present and retains the last successfully confirmed OpenWrt host for remote tdhome access.
+- Diagnostics includes a manual, read-only VPS Network Health probe for the default route, RU-mark route lookup, DNS, HTTPS/TLS, Xray listener, Docker-hosted Caddy, and VPS resource headroom. Results are retained in local diagnostic history.
+- Server-side route lookup and service checks are reported as evidence for those checks only; they do not claim a home-device path or an active VLESS + REALITY client session. See [the network audit](NETWORK_OPTIMIZATION_REPORT.md) and [the user guide](TUNNELDECK_NETWORK_GUIDE.md).
 
 
 - Fixed TP-Link Archer AX18 SG L1 S2 session compatibility by sending the browser-compatible Referer and Origin headers used by the router web client/reference implementation.
@@ -147,6 +149,12 @@ The repository does not contain credentials, server addresses or production VPN 
 5. Run **Test SSH**, then **Discover infrastructure**.
 
 TunnelDeck invokes `/usr/bin/ssh` with `IdentitiesOnly=yes`, batch authentication, timeout handling and strict host-key checking. The private key stays on the Mac and is never copied to the VPS.
+
+## Network Health and Diagnostics
+
+Open **Diagnostics** and run **VPS Network Health** for a bounded read-only check from the configured VPS. TunnelDeck checks its main route, performs a lookup for a Russian destination with the existing `0x67` policy mark, resolves a test DNS name, makes one short HTTPS/TLS request, inspects Xray's unit/listener and the configured Caddy Docker container, and reports available RAM and disk headroom. Each run appears in diagnostic history.
+
+The route lookup does not send a test packet through the selected route. VPS-side results do not confirm Xiaomi forwarding, per-device policy, DNS/IPv6 leak behavior, or a live VLESS + REALITY client session. Use **DNS Path Test** for resolver comparison from the Mac; verify a home-device route separately before changing network policy. This diagnostic button never changes routes or restarts services.
 
 ![First-run assistant](docs/screenshots/onboarding.png)
 
