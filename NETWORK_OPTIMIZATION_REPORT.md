@@ -63,7 +63,7 @@ Automatic tunnel or route recovery remains disabled. The available evidence does
 
 ## Rollback and Git
 
-The added app behavior can be reverted by reverting its code commit. No infrastructure rollback is needed because the infrastructure was read-only. The DNS filtering edits that were already in the checkout were retained and included with the related DNS discovery/UI work. Commit/branch status will be updated here after validation.
+The added app behavior can be reverted by reverting commit `97fb315`. No infrastructure rollback is needed because the infrastructure was read-only. The DNS filtering edits that were already in the checkout were retained and included with the related DNS discovery/UI work. Work is committed on `feature/network-health-recovery`; the branch is local and was not pushed.
 
 ## Recommended next steps
 
