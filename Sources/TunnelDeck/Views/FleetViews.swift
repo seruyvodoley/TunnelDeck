@@ -45,13 +45,13 @@ struct TopologyView: View {
                     flowLine(.direct,label:directLabel,nodes:[
                         gatewayNode,
                         uplinkNode,
-                        Node("RU Internet",model.homeInfrastructure.directPathConfirmed && uplinkState == .online ? .unknown:.unknown,"Route evidence only")
+                        Node("RU Internet",.unknown,directReachabilityDetail)
                     ])
                     flowLine(.foreign,label:foreignLabel,nodes:[
                         gatewayNode,
                         tunnelNode(model.homeInfrastructure.foreignTunnel,fallback:"Foreign Tunnel"),
                         Node(model.activeNodeName,model.system.health,model.system.publicIPv4),
-                        Node("Foreign Internet",model.system.publicIPv4 == "—" ? .unknown:.online,"VPS egress")
+                        Node("Foreign Internet",.unknown,"External egress has not been probed")
                     ])
                 }
 
@@ -59,14 +59,14 @@ struct TopologyView: View {
                     flowLine(.service,label:"Remote access",nodes:[
                         Node("Remote WG Client",remoteClientState,remoteClientDetail),
                         Node("VPS wg0",model.wireGuard.state,model.wireGuard.address),
-                        Node("Foreign Internet",model.system.publicIPv4 == "—" ? .unknown:.online,model.system.publicIPv4)
+                        Node("VPS public egress",.unknown,"Public address observed; external reachability has not been probed")
                     ])
                     flowLine(.direct,label:remoteRULabel,nodes:[
                         Node("VPS wg0",model.wireGuard.state,model.wireGuard.address),
                         tunnelNode(model.homeInfrastructure.homeExitTunnel,fallback:"RU Home Exit"),
                         gatewayNode,
                         uplinkNode,
-                        Node("Russian Internet",.unknown,"Path observed; external reachability not assumed")
+                        Node("Russian Internet",.unknown,directReachabilityDetail)
                     ])
                 }
 
@@ -85,9 +85,41 @@ struct TopologyView: View {
                         Node("Home Client",homeLANState,nil),
                         Node("Xiaomi DNS",model.homeInfrastructure.gateway.dnsServer == true ? model.homeInfrastructure.gateway.state:.unknown,model.homeInfrastructure.gateway.host),
                         tunnelNode(model.homeInfrastructure.foreignTunnel,fallback:"Foreign Tunnel"),
-                        Node(model.activeNodeName,model.system.health,"Foreign exit"),
-                        Node("Cloudflare DNS",.unknown,model.homeInfrastructure.gateway.upstreamDNS.isEmpty ? "Upstream not observed":model.homeInfrastructure.gateway.upstreamDNS.joined(separator:", "))
+                        Node(model.activeNodeName,model.system.health,"VPS DNS relay path not observed"),
+                        Node("Configured upstream DNS",model.homeInfrastructure.dnsForeignConfirmed ? .online:.unknown,dnsUpstreamDetail)
                     ])
+                }
+
+                if model.homeInfrastructure.xrayService.observedAt != nil {
+                    topologySection("VLESS + REALITY","Xray status is based on systemd state and the TCP listener. Client handshake and end-to-end egress are shown as unverified until probed.") {
+                        flowLine(.service,label:"VLESS/TCP",nodes:[
+                            Node("Remote VLESS client",.unknown,"Client handshake not probed"),
+                            Node("Xray · REALITY",model.homeInfrastructure.xrayService.state,xrayDetail),
+                            xrayEgressNode,
+                            Node("External egress",.unknown,"Not probed end to end")
+                        ])
+                    }
+                }
+
+                topologySection("Discovered network components","Every interface returned by WireGuard and AmneziaWG discovery is listed here. Newly observed interfaces appear automatically after refresh.") {
+                    let components=discoveredTunnelNodes
+                    if components.isEmpty {
+                        Text("No tunnel interfaces discovered in the latest scan.").foregroundStyle(.secondary)
+                    } else {
+                        LazyVGrid(columns:[GridItem(.adaptive(minimum:260),alignment:.leading)],alignment:.leading,spacing:10) {
+                            ForEach(components) { component in nodeView(component) }
+                        }
+                    }
+                    let listeners=discoveredListenerNodes
+                    if !listeners.isEmpty {
+                        Text("Listening services").font(.subheadline.bold()).padding(.top,6)
+                        LazyVGrid(columns:[GridItem(.adaptive(minimum:260),alignment:.leading)],alignment:.leading,spacing:10) {
+                            ForEach(listeners) { component in nodeView(component) }
+                        }
+                    }
+                    if model.homeInfrastructure.xrayService.observedAt != nil {
+                        nodeView(Node("Xray · REALITY",model.homeInfrastructure.xrayService.state,xrayDetail))
+                    }
                 }
 
                 GroupBox("Discovery evidence") {
@@ -97,6 +129,7 @@ struct TopologyView: View {
                         GridRow { Text("Foreign policy").foregroundStyle(.secondary); Text(foreignLabel) }
                         GridRow { Text("Remote RU policy").foregroundStyle(.secondary); Text(remoteRULabel) }
                         GridRow { Text("Management").foregroundStyle(.secondary); Text(managementLabel) }
+                        GridRow { Text("Xray").foregroundStyle(.secondary); Text(model.homeInfrastructure.xrayService.evidence ?? "Not discovered") }
                     }.padding(8)
                 }
             }
@@ -194,6 +227,60 @@ struct TopologyView: View {
     }
 
     private var remoteClientDetail:String{"\(model.wireGuard.peers.filter{$0.status == .online}.count)/\(model.wireGuard.peers.count) peers online"}
+
+    private var discoveredTunnelNodes:[Node]{
+        let sources:[(String,[InfrastructureTunnelSnapshot])]=[("VPS",model.homeInfrastructure.vpsTunnels),("OpenWrt",model.homeInfrastructure.gatewayTunnels)]
+        return sources.map{pair in
+            let (source,tunnels)=pair
+            return tunnels.sorted{$0.name<$1.name}.map{tunnel in
+                var details=[tunnel.transport]
+                if let address=tunnel.localAddress{details.append("local \(address)")}
+                if let address=tunnel.peerAddress{details.append("peer \(address)")}
+                if let port=tunnel.listenPort{details.append("listen \(port)")}
+                if let mtu=tunnel.mtu{details.append("MTU \(mtu)")}
+                if let handshake=tunnel.latestHandshake{details.append("handshake \(handshake.formatted(.relative(presentation:.numeric)))")}
+                if tunnel.latestHandshake==nil{details.append("no recent handshake")}
+                details.append("RX \(ByteCountFormatter.string(fromByteCount:Int64(clamping:tunnel.receivedBytes),countStyle:.memory)) · TX \(ByteCountFormatter.string(fromByteCount:Int64(clamping:tunnel.sentBytes),countStyle:.memory))")
+                return Node("\(source) · \(tunnel.name)",tunnel.state,details.joined(separator:" · "))
+            }
+        }.flatMap{$0}
+    }
+
+    private var discoveredListenerNodes:[Node]{
+        model.listeners.sorted{($0.port,$0.protocolName,$0.address)<($1.port,$1.protocolName,$1.address)}.map{listener in
+            let process=listener.process.isEmpty ? "process unknown":"\(listener.process)"
+            return Node("\(listener.protocolName.uppercased()) · \(listener.port)",.online,"\(listener.address) · \(process) · socket observed")
+        }
+    }
+
+    private var xrayEgressNode:Node{
+        let service=model.homeInfrastructure.xrayService
+        guard let name=service.egressInterface,let tunnel=model.homeInfrastructure.vpsTunnels.first(where:{$0.name==name}) else{
+            return Node("Policy egress",.unknown,"Xray process mark or matching VPS route not discovered")
+        }
+        let mark=service.egressMark.map{"mark \($0) · "} ?? ""
+        return Node("VPS egress · \(name)",tunnel.state,"\(mark)\(tunnel.transport) · \(tunnel.localAddress ?? "address unknown")")
+    }
+
+    private var xrayDetail:String{
+        let service=model.homeInfrastructure.xrayService
+        let enabled=service.enabled == true ? "enabled":"enabled state unknown"
+        let listener=service.listening == true ? "TCP \(service.tcpPort) listening":"TCP \(service.tcpPort) not confirmed"
+        return "systemd \(service.state.rawValue) · \(enabled) · \(listener)"
+    }
+
+    private var directReachabilityDetail:String{
+        let gateway=model.homeInfrastructure.gateway.defaultGateway ?? "unknown gateway"
+        let interface=model.homeInfrastructure.gateway.defaultInterface ?? "unknown interface"
+        return model.homeInfrastructure.directPathConfirmed ? "Route via \(gateway) on \(interface) observed; Internet probe not run":"Route and external reachability not confirmed"
+    }
+
+    private var dnsUpstreamDetail:String{
+        let upstream=model.homeInfrastructure.gateway.upstreamDNS
+        guard !upstream.isEmpty else{return "No upstream DNS address discovered"}
+        let policy=model.homeInfrastructure.dnsForeignConfirmed ? "nftables policy mark observed":"forwarding policy not confirmed"
+        return "\(upstream.joined(separator:", ")) · \(policy); DNS query not probed"
+    }
 
     private var directLabel:String{
         guard model.homeInfrastructure.directPathConfirmed else{return "DIRECT · Unknown"}

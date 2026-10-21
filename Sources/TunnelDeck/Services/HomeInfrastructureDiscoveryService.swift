@@ -7,12 +7,14 @@ actor HomeInfrastructureDiscoveryService{
     func discover(vpsConfiguration:SSHConfiguration,gatewayConfigurations:[SSHConfiguration],homeNetwork:HomeNetwork?,homeDeviceCount:Int,handshakeTimeout:TimeInterval)async->HomeInfrastructureSnapshot{
         let attempted=Date()
         async let vpsResult:CommandResult? = safeExecute(.topologyVPS,configuration:vpsConfiguration)
+        async let xrayUIDResult:CommandResult? = safeExecute(.topologyVPSXrayUser,configuration:vpsConfiguration)
         let gatewayResult=await firstOpenWrt(in:gatewayConfigurations)
         let vps=await vpsResult
+        let xrayUID=await xrayUIDResult
 
         var snapshot=HomeInfrastructureSnapshot(homeCIDR:homeNetwork?.cidr.nonEmptyValue,homeDeviceCount:homeDeviceCount,lastAttemptAt:attempted)
         if let vps{
-            let parsed=HomeInfrastructureParser.vps(vps.stdout,commandSucceeded:vps.succeeded,now:attempted,handshakeTimeout:handshakeTimeout)
+            let parsed=HomeInfrastructureParser.vps(vps.stdout,xrayUID:xrayUID?.stdout,commandSucceeded:vps.succeeded,now:attempted,handshakeTimeout:handshakeTimeout)
             snapshot.vpsPolicy=parsed.policy
             snapshot.vpsTunnels=parsed.tunnels
             snapshot.xrayService=parsed.xray
@@ -111,7 +113,7 @@ enum HomeInfrastructureParser{
         return OpenWrtResult(gateway:gateway,tunnels:tunnels)
     }
 
-    static func vps(_ text:String,commandSucceeded:Bool,now:Date,handshakeTimeout:TimeInterval)->VPSResult{
+    static func vps(_ text:String,xrayUID:String?=nil,commandSucceeded:Bool,now:Date,handshakeTimeout:TimeInterval)->VPSResult{
         let sections=TaggedDiscoveryOutput.sections(text)
         var policy=VPSPolicySnapshot(state:commandSucceeded ? .online:.unknown,observedAt:commandSucceeded ? now:nil,evidence:commandSucceeded ? "Read-only VPS SSH policy discovery":nil)
         let routes=sections["ROUTES"] ?? "",rules=sections["RULES"] ?? ""
@@ -135,7 +137,16 @@ enum HomeInfrastructureParser{
         let listening = !(sections["XRAY_LISTENER"] ?? "").isEmpty
         let loaded=service["LoadState"]=="loaded"
         let active=service["ActiveState"]=="active" && service["SubState"]=="running"
-        let xray=XrayServiceSnapshot(state:!commandSucceeded ? .unknown:(loaded && active && listening ? .online:.warning),enabled:service["UnitFileState"].map{$0=="enabled"},tcpPort:8443,listening:commandSucceeded ? listening:nil,observedAt:commandSucceeded ? now:nil,evidence:commandSucceeded ? "Read-only Xray systemd and TCP listener discovery":nil)
+        let nftLines=(sections["NFT_HINTS"] ?? "").split(separator:"\n").map(String.init)
+        let uid=xrayUID?.trimmingCharacters(in:.whitespacesAndNewlines)
+        let xrayPolicyLines=uid.map{value in nftLines.filter{$0.range(of:#"\bskuid\s+\#(value)\b"#,options:.regularExpression) != nil}} ?? []
+        let markRegex=try? NSRegularExpression(pattern:#"(?:mark\s+set|ct\s+mark)\s+(0x[0-9a-fA-F]+)\b"#)
+        let xrayMark=xrayPolicyLines.lazy.compactMap{line->String? in
+            guard let match=markRegex?.firstMatch(in:line,range:NSRange(line.startIndex...,in:line)),let range=Range(match.range(at:1),in:line) else{return nil}
+            return String(line[range])
+        }.first
+        let xrayEgress=xrayMark.flatMap{mark in policies.first(where:{$0.mark?.lowercased()==mark.lowercased()})?.interface}
+        let xray=XrayServiceSnapshot(state:!commandSucceeded ? .unknown:(loaded && active && listening ? .online:.warning),enabled:service["UnitFileState"].map{$0=="enabled"},tcpPort:8443,listening:commandSucceeded ? listening:nil,egressMark:xrayMark,egressInterface:xrayEgress,observedAt:commandSucceeded ? now:nil,evidence:commandSucceeded ? "Read-only systemd, listener and process-policy discovery":nil)
         return VPSResult(policy:policy,tunnels:tunnels,xray:xray)
     }
 

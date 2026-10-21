@@ -67,6 +67,8 @@ struct XrayServiceSnapshot:Sendable,Equatable{
     var enabled:Bool?
     var tcpPort:Int = 8443
     var listening:Bool?
+    var egressMark:String?
+    var egressInterface:String?
     var observedAt:Date?
     var evidence:String?
 }
