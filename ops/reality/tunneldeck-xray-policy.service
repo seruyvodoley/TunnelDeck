@@ -1,0 +1,14 @@
+[Unit]
+Description=TunnelDeck Xray split routing mark
+Wants=network-online.target
+Requires=tunneldeck-ru-route.service
+After=network-online.target tunneldeck-firewall.service tunneldeck-ru-route.service
+Before=xray.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/tunneldeck-xray-policy
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

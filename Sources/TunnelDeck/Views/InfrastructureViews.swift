@@ -448,6 +448,17 @@ struct RouterView: View {
                     }
                 }
 
+                MetricCard(title:"VLESS + REALITY",icon:"lock.shield") {
+                    let xray=model.homeInfrastructure.xrayService
+                    VStack(spacing:10) {
+                        HStack { StatusDot(state:xray.state); Text(xray.state == .online ? "Xray active":"Xray status").font(.headline); Spacer() }
+                        KeyValueRow(key:"Autostart",value:xray.enabled.map{$0 ? "Enabled":"Disabled"} ?? "Unknown")
+                        KeyValueRow(key:"TCP listener",value:xray.listening.map{$0 ? "Listening on :\(xray.tcpPort)":"Unavailable"} ?? "Unknown")
+                        KeyValueRow(key:"Observed",value:xray.observedAt?.formatted(.relative(presentation:.numeric)) ?? "Not confirmed")
+                        Text("Transport status only. Exit routing is reported separately by RU policy and tunnel status.").font(.caption).foregroundStyle(.secondary).frame(maxWidth:.infinity,alignment:.leading)
+                    }
+                }
+
                 ForEach(model.homeInfrastructure.gatewayTunnels){tunnel in
                     tunnelCard(tunnel,location:"OpenWrt")
                 }

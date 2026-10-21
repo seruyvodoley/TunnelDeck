@@ -182,3 +182,22 @@ import Testing
     #expect(open.tunnels.isEmpty)
     #expect(vps.tunnels.isEmpty)
 }
+
+@Test func xrayServiceTelemetryRequiresActiveUnitAndListener(){
+    let now=Date()
+    let text="""
+    __TD_XRAY_SERVICE__
+    LoadState=loaded
+    UnitFileState=enabled
+    ActiveState=active
+    SubState=running
+    __TD_XRAY_LISTENER__
+    LISTEN 0 4096 *:8443
+    """
+    let parsed=HomeInfrastructureParser.vps(text,commandSucceeded:true,now:now,handshakeTimeout:180)
+    #expect(parsed.xray.state == .online)
+    #expect(parsed.xray.enabled == true)
+    #expect(parsed.xray.tcpPort == 8443)
+    #expect(parsed.xray.listening == true)
+    #expect(parsed.xray.observedAt == now)
+}

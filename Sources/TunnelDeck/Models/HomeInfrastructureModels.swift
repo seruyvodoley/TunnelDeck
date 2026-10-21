@@ -62,9 +62,19 @@ struct VPSPolicySnapshot:Sendable,Equatable{
     var evidence:String?
 }
 
+struct XrayServiceSnapshot:Sendable,Equatable{
+    var state:HealthState = .unknown
+    var enabled:Bool?
+    var tcpPort:Int = 8443
+    var listening:Bool?
+    var observedAt:Date?
+    var evidence:String?
+}
+
 struct HomeInfrastructureSnapshot:Sendable,Equatable{
     var gateway=OpenWrtGatewaySnapshot()
     var vpsPolicy=VPSPolicySnapshot()
+    var xrayService=XrayServiceSnapshot()
     var gatewayTunnels:[InfrastructureTunnelSnapshot]=[]
     var vpsTunnels:[InfrastructureTunnelSnapshot]=[]
     var homeCIDR:String?

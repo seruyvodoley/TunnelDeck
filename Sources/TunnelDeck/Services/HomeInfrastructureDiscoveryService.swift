@@ -15,6 +15,7 @@ actor HomeInfrastructureDiscoveryService{
             let parsed=HomeInfrastructureParser.vps(vps.stdout,commandSucceeded:vps.succeeded,now:attempted,handshakeTimeout:handshakeTimeout)
             snapshot.vpsPolicy=parsed.policy
             snapshot.vpsTunnels=parsed.tunnels
+            snapshot.xrayService=parsed.xray
         }
         if let gatewayResult{
             let parsed=HomeInfrastructureParser.openWrt(gatewayResult.result.stdout,host:gatewayResult.configuration.host,commandSucceeded:gatewayResult.result.succeeded,now:attempted,handshakeTimeout:handshakeTimeout,vpsTunnels:snapshot.vpsTunnels)
@@ -63,7 +64,7 @@ enum TaggedDiscoveryOutput{
 
 enum HomeInfrastructureParser{
     struct OpenWrtResult:Sendable{var gateway:OpenWrtGatewaySnapshot;var tunnels:[InfrastructureTunnelSnapshot]}
-    struct VPSResult:Sendable{var policy:VPSPolicySnapshot;var tunnels:[InfrastructureTunnelSnapshot]}
+    struct VPSResult:Sendable{var policy:VPSPolicySnapshot;var tunnels:[InfrastructureTunnelSnapshot];var xray:XrayServiceSnapshot}
 
     static func openWrt(_ text:String,host:String,commandSucceeded:Bool,now:Date,handshakeTimeout:TimeInterval,vpsTunnels:[InfrastructureTunnelSnapshot])->OpenWrtResult{
         let sections=TaggedDiscoveryOutput.sections(text)
@@ -126,7 +127,16 @@ enum HomeInfrastructureParser{
         )
         if let homeExit=policy.homeExitInterface{assignRole("Remote RU Home Exit",to:homeExit,in:&tunnels)}
         if tunnels.contains(where:{$0.name=="wg0"}){assignRole("Remote Access VPN",to:"wg0",in:&tunnels)}
-        return VPSResult(policy:policy,tunnels:tunnels)
+        let service=Dictionary(uniqueKeysWithValues:(sections["XRAY_SERVICE"] ?? "").split(separator:"\n").compactMap{line->(String,String)? in
+            let pair=line.split(separator:"=",maxSplits:1,omittingEmptySubsequences:false)
+            guard pair.count==2 else{return nil}
+            return(String(pair[0]),String(pair[1]))
+        })
+        let listening = !(sections["XRAY_LISTENER"] ?? "").isEmpty
+        let loaded=service["LoadState"]=="loaded"
+        let active=service["ActiveState"]=="active" && service["SubState"]=="running"
+        let xray=XrayServiceSnapshot(state:!commandSucceeded ? .unknown:(loaded && active && listening ? .online:.warning),enabled:service["UnitFileState"].map{$0=="enabled"},tcpPort:8443,listening:commandSucceeded ? listening:nil,observedAt:commandSucceeded ? now:nil,evidence:commandSucceeded ? "Read-only Xray systemd and TCP listener discovery":nil)
+        return VPSResult(policy:policy,tunnels:tunnels,xray:xray)
     }
 
     private struct MarkedPolicy{var priority:Int?;var mark:String?;var table:String?;var interface:String?}

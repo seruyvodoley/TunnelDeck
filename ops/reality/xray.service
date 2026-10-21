@@ -1,0 +1,29 @@
+[Unit]
+Description=Xray VLESS REALITY transport for TunnelDeck
+Wants=network-online.target tunneldeck-xray-policy.service
+Requires=tunneldeck-xray-policy.service
+After=network-online.target tunneldeck-firewall.service tunneldeck-ru-route.service tunneldeck-xray-policy.service
+
+[Service]
+Type=simple
+User=xray
+Group=xray
+ExecStartPre=/usr/local/bin/xray run -test -config /usr/local/etc/xray/config.json
+ExecStart=/usr/local/bin/xray run -config /usr/local/etc/xray/config.json
+Restart=on-failure
+RestartSec=3s
+LimitNOFILE=65536
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target
