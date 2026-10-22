@@ -325,6 +325,49 @@ struct DiagnosticsView: View {
                     Text("Read-only server probes · no route or service changes").font(.caption).foregroundStyle(.secondary)
                 }
 
+                GroupBox("Home Exit Health · RU route") {
+                    VStack(alignment: .leading, spacing: 9) {
+                        HStack {
+                            StatusDot(state: model.homeExitHealth.state)
+                            Text(homeExitStateTitle(model.homeExitHealth.state)).fontWeight(.semibold)
+                            Spacer()
+                            Button(model.isRunningHomeExitHealth ? "Checking…" : "Check Home Exit") {
+                                Task { await model.runHomeExitHealthProbe() }
+                            }
+                            .disabled(model.isRunningHomeExitHealth)
+                        }
+                        if model.homeExitHealth.checkedAt == .distantPast {
+                            Text("Checks fwmark 0x67 → table 167 → homeexit and makes a pinned HTTPS request through that interface. The VPS ens3 request is reported as a possible fallback only; it never changes routing.")
+                                .foregroundStyle(.secondary)
+                        } else {
+                            HStack {
+                                Text(model.homeExitHealth.host).fontWeight(.medium)
+                                Spacer()
+                                Text(model.homeExitHealth.checkedAt.formatted(date: .abbreviated, time: .standard))
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                            Text(model.homeExitHealth.reason).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                            Grid(alignment: .leading, horizontalSpacing: 20, verticalSpacing: 7) {
+                                GridRow { Text("Interface"); Text(model.homeExitHealth.interfaceUp.map { $0 ? "Up" : "Down" } ?? "Unknown") }
+                                GridRow { Text("Last handshake"); Text(homeExitAge(model.homeExitHealth.handshakeAgeSeconds)) }
+                                GridRow { Text("Policy route"); Text(homeExitBool(model.homeExitHealth.routeCorrect)) }
+                                GridRow { Text("RU set · probe IP"); Text(homeExitBool(model.homeExitHealth.ruAddressSetContainsProbe)) }
+                                GridRow { Text("DNS · ya.ru"); Text(model.homeExitHealth.dnsAddress ?? "Failed / unknown") }
+                                GridRow { Text("HTTPS via homeexit"); Text(homeExitHTTP(model.homeExitHealth.homeExitHTTPStatus, passed: model.homeExitHealth.homeExitDataPassed, latency: model.homeExitHealth.homeExitLatencySeconds)) }
+                                GridRow { Text("VPS ens3 candidate"); Text(homeExitHTTP(model.homeExitHealth.vpsFallbackHTTPStatus, passed: model.homeExitHealth.vpsFallbackDataPassed, latency: model.homeExitHealth.vpsFallbackLatencySeconds)) }
+                                GridRow { Text("homeexit RX / TX"); Text(homeExitBytes(model.homeExitHealth.receivedBytes, model.homeExitHealth.sentBytes, model.homeExitHealth.receivedDeltaBytes, model.homeExitHealth.sentDeltaBytes)) }
+                                GridRow { Text("Consecutive failures"); Text("\(model.homeExitHealth.consecutiveFailures)") }
+                                GridRow { Text("Outage duration"); Text(homeExitDuration(model.homeExitHealth.currentOutageSeconds)) }
+                                GridRow { Text("Recommendation"); Text(model.homeExitHealth.recommendation.rawValue) }
+                            }
+                            .font(.caption)
+                            Text("Automatic route changes are disabled. A successful handshake alone does not mark the path healthy.")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                    .padding(8)
+                }
+
                 GroupBox("Network Health · VPS read-only probes") {
                     VStack(alignment: .leading, spacing: 9) {
                         if model.networkHealth.probes.isEmpty {
@@ -424,6 +467,49 @@ struct DiagnosticsView: View {
             }
             .padding(20)
         }
+    }
+
+    private func homeExitStateTitle(_ state: HealthState) -> String {
+        switch state {
+        case .online: "Home Exit data path healthy"
+        case .warning: "Home Exit needs attention"
+        case .critical: "Home Exit critical"
+        case .offline: "Home Exit data path unavailable"
+        case .unknown: "Home Exit status unknown"
+        }
+    }
+
+    private func homeExitBool(_ value: Bool?) -> String {
+        guard let value else { return "Unknown" }
+        return value ? "Confirmed" : "Failed"
+    }
+
+    private func homeExitAge(_ seconds: TimeInterval?) -> String {
+        guard let seconds else { return "No handshake observed" }
+        if seconds < 60 { return "\(Int(seconds)) sec ago" }
+        if seconds < 3600 { return "\(Int(seconds / 60)) min ago" }
+        return "\(Int(seconds / 3600)) hr ago"
+    }
+
+    private func homeExitHTTP(_ status: Int?, passed: Bool?, latency: Double?) -> String {
+        guard let passed else { return "Unknown" }
+        let result = status.map(String.init) ?? (passed ? "OK" : "Failed")
+        let duration = latency.map { String(format: " · %.2fs", $0) } ?? ""
+        return "\(passed ? "Passed" : "Failed") · HTTP \(result)\(duration)"
+    }
+
+    private func homeExitBytes(_ received: UInt64?, _ sent: UInt64?, _ receivedDelta: UInt64?, _ sentDelta: UInt64?) -> String {
+        guard let received, let sent else { return "Unknown" }
+        let rx = ByteCountFormatter.string(fromByteCount: Int64(clamping: received), countStyle: .file)
+        let tx = ByteCountFormatter.string(fromByteCount: Int64(clamping: sent), countStyle: .file)
+        let delta = receivedDelta.flatMap { r in sentDelta.map { t in " · Δ +\(ByteCountFormatter.string(fromByteCount: Int64(clamping: r), countStyle: .file)) / +\(ByteCountFormatter.string(fromByteCount: Int64(clamping: t), countStyle: .file))" } } ?? ""
+        return "RX \(rx) · TX \(tx)\(delta)"
+    }
+
+    private func homeExitDuration(_ value: TimeInterval?) -> String {
+        guard let value else { return "No confirmed outage" }
+        let minutes = Int(value / 60)
+        return minutes < 1 ? "under 1 min" : "\(minutes) min"
     }
 
     private func diagnosticButton(_ title: String, _ command: ReadCommand) -> some View {

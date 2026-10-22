@@ -43,6 +43,8 @@ final class AppViewModel: ObservableObject {
     @Published var isRunningDNSPathTest = false
     @Published var networkHealth = NetworkHealthSnapshot(checkedAt: .distantPast, host: "Not checked", probes: [])
     @Published var isRunningNetworkHealth = false
+    @Published var homeExitHealth = HomeExitHealthSnapshot.notChecked
+    @Published var isRunningHomeExitHealth = false
     @Published var security = SecuritySnapshot()
     @Published var isRefreshingSecurity = false
     @Published var monitoringSamples: [MonitoringSample] = []
@@ -74,6 +76,7 @@ final class AppViewModel: ObservableObject {
     lazy var remediationController = RemediationController(helper2: helper2)
     lazy var agent = AgentService(ssh: ssh)
     private let history = DiagnosticHistoryStore()
+    private let homeExitHealthHistory = HomeExitHealthHistoryStore()
     private let activityStore = ActivityStore()
     private let monitoringStore = MonitoringHistoryStore()
     private let fleetController = FleetController()
@@ -171,7 +174,7 @@ final class AppViewModel: ObservableObject {
     func selectServer(_ id: UUID) {
         guard let server = servers.first(where: { $0.id == id }) else { return }
         nodeOperations.advance();refreshCadence.reset();cpuDeltaTracker.reset();securityOperation.cancel();nodeLoadTask?.cancel();wakeTask?.cancel();agentSyncTask?.cancel();alertSaveTask?.cancel();healthCheckTask?.cancel();healthCheckTask=nil;agentSyncTask=nil;agentSyncToken=nil;refreshToken=nil;healthCheckToken=nil;isRefreshing=false;isRunningHealthCheck=false
-        activeServerID = id; UserDefaults.standard.set(id.uuidString, forKey: "activeServerID"); settings.host = server.host; settings.port = server.port; settings.username = server.username; settings.keyPath = server.keyPath;isRefreshingSecurity=false
+        activeServerID = id; UserDefaults.standard.set(id.uuidString, forKey: "activeServerID"); settings.host = server.host; settings.port = server.port; settings.username = server.username; settings.keyPath = server.keyPath;isRefreshingSecurity=false;homeExitHealth = .notChecked
         system = SystemSnapshot(); wireGuard = WireGuardSnapshot(); units = []; listeners = []; healthReport = nil; security = SecuritySnapshot(); exposureEndpoints=[];monitoringSamples = []; monitoringEvents = []; peerHistory=[];adGuardHistory=[];incidents=[];alertRules=[];alertStates=[:];alertEvents=[];configurationBaseline=nil;baselineDrift=[];lastPeerHistorySample=nil;lastAdGuardHistorySample=nil;homeInfrastructure.vpsPolicy=VPSPolicySnapshot();homeInfrastructure.vpsTunnels=[];homeInfrastructure.xrayService=XrayServiceSnapshot();loadServerScopedState()
         saveSettings();nodeLoadTask=Task{[weak self] in guard let self else{return};await self.loadMonitoringHistory();guard !Task.isCancelled else{return};await self.syncAgentHistory();guard !Task.isCancelled else{return};await self.loadMonitoringHistory();await self.loadBaseline();guard !Task.isCancelled else{return};await self.refresh()}
         updateFleet()
@@ -267,6 +270,9 @@ final class AppViewModel: ObservableObject {
             if let host=discovered.gateway.host,discovered.gateway.state == .online{UserDefaults.standard.set(host,forKey:"tunneldeck-openwrt-host")}
         }
         if values.0.succeeded,refreshCadence.shouldRun("helper-api",every:60) { await refreshHelper(); await sampleAdGuardHistoryIfNeeded() }
+        if values.0.succeeded,refreshCadence.shouldRun("homeexit-health",every:180) {
+            await performHomeExitHealthProbe(configuration: capturedConfiguration, context: context)
+        }
         guard accepts(context),refreshToken==token,!Task.isCancelled else{return}
         await recordMonitoringState(context:context)
         guard accepts(context),refreshToken==token,!Task.isCancelled else{return}
@@ -763,6 +769,33 @@ final class AppViewModel: ObservableObject {
         let passed = networkHealth.probes.filter { $0.state == .passed }.count
         let summary = "\(passed) passed, \(failed.count) require review · \(networkHealth.host)"
         let entry = DiagnosticResult(id: UUID(), date: networkHealth.checkedAt, name: "VPS Network Health", success: failed.isEmpty && passed > 0, summary: summary, milliseconds: result.duration * 1000)
+        await history.append(entry)
+        diagnostics = await history.load()
+    }
+
+    func runHomeExitHealthProbe() async {
+        let context = captureNodeContext()
+        await performHomeExitHealthProbe(configuration: context.configuration, context: context)
+    }
+
+    private func performHomeExitHealthProbe(configuration: SSHConfiguration, context: NodeOperationContext) async {
+        guard !isRunningHomeExitHealth, !configuration.host.isEmpty else { return }
+        isRunningHomeExitHealth = true
+        defer { isRunningHomeExitHealth = false }
+
+        let previous = await homeExitHealthHistory.load().filter { $0.host == configuration.host }
+        let result = await execute(.homeExitHealthVPS, subsystem: "Home Exit Health", configuration: configuration)
+        guard !isMacSleeping, accepts(context) else { return }
+        let snapshot = HomeExitHealthSnapshot.parse(result.stdout, succeeded: result.succeeded, history: previous)
+        homeExitHealth = snapshot
+        await homeExitHealthHistory.append(snapshot.historySample)
+
+        let summary = "\(snapshot.state.rawValue) · \(snapshot.reason) · recovery=diagnostic-only"
+        let entry = DiagnosticResult(
+            id: UUID(), date: snapshot.checkedAt, name: "Home Exit Health",
+            success: snapshot.state == .online, summary: summary,
+            milliseconds: result.duration * 1000
+        )
         await history.append(entry)
         diagnostics = await history.load()
     }
