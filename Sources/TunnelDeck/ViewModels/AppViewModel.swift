@@ -764,7 +764,9 @@ final class AppViewModel: ObservableObject {
         isRunningNetworkHealth = true
         defer { isRunningNetworkHealth = false }
         let result = await execute(.networkHealthVPS, subsystem: "Network Health")
-        networkHealth = NetworkHealthSnapshot.parse(result.stdout, succeeded: result.succeeded)
+        let xhttpResult = await execute(.networkHealthXHTTP, subsystem: "Network Health")
+        let xhttpTLSResult = await execute(.networkHealthXHTTPTLS, subsystem: "Network Health")
+        networkHealth = NetworkHealthSnapshot.parse(result.stdout + "\n" + xhttpResult.stdout + "\n" + xhttpTLSResult.stdout, succeeded: result.succeeded)
         let failed = networkHealth.probes.filter { $0.state == .failed || $0.state == .warning }
         let passed = networkHealth.probes.filter { $0.state == .passed }.count
         let summary = "\(passed) passed, \(failed.count) require review · \(networkHealth.host)"

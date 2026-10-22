@@ -1,0 +1,29 @@
+[Unit]
+Description=TunnelDeck secondary VLESS XHTTP REALITY transport
+Wants=network-online.target tunneldeck-xray-policy.service
+Requires=tunneldeck-xray-policy.service
+After=network-online.target tunneldeck-firewall.service tunneldeck-ru-route.service tunneldeck-xray-policy.service
+
+[Service]
+Type=simple
+User=xray
+Group=xray
+ExecStartPre=/usr/local/lib/tunneldeck-xray/xray-26.10.21 run -test -config /usr/local/etc/xray/xhttp.json
+ExecStart=/usr/local/lib/tunneldeck-xray/xray-26.10.21 run -config /usr/local/etc/xray/xhttp.json
+Restart=on-failure
+RestartSec=3s
+LimitNOFILE=65536
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

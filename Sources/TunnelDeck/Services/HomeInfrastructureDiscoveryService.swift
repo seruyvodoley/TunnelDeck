@@ -8,13 +8,18 @@ actor HomeInfrastructureDiscoveryService{
         let attempted=Date()
         async let vpsResult:CommandResult? = safeExecute(.topologyVPS,configuration:vpsConfiguration)
         async let xrayUIDResult:CommandResult? = safeExecute(.topologyVPSXrayUser,configuration:vpsConfiguration)
+        async let xhttpResult:CommandResult? = safeExecute(.topologyVPSXrayXHTTP,configuration:vpsConfiguration)
+        async let xhttpTLSResult:CommandResult? = safeExecute(.topologyVPSXrayXHTTPTLS,configuration:vpsConfiguration)
         let gatewayResult=await firstOpenWrt(in:gatewayConfigurations)
         let vps=await vpsResult
         let xrayUID=await xrayUIDResult
+        let xhttp=await xhttpResult
+        let xhttpTLS=await xhttpTLSResult
 
         var snapshot=HomeInfrastructureSnapshot(homeCIDR:homeNetwork?.cidr.nonEmptyValue,homeDeviceCount:homeDeviceCount,lastAttemptAt:attempted)
         if let vps{
-            let parsed=HomeInfrastructureParser.vps(vps.stdout,xrayUID:xrayUID?.stdout,commandSucceeded:vps.succeeded,now:attempted,handshakeTimeout:handshakeTimeout)
+            let discoveryText=[vps.stdout,xhttp?.stdout,xhttpTLS?.stdout].compactMap{$0}.joined(separator:"\n")
+            let parsed=HomeInfrastructureParser.vps(discoveryText,xrayUID:xrayUID?.stdout,commandSucceeded:vps.succeeded,now:attempted,handshakeTimeout:handshakeTimeout)
             snapshot.vpsPolicy=parsed.policy
             snapshot.vpsTunnels=parsed.tunnels
             snapshot.xrayService=parsed.xray
@@ -147,9 +152,29 @@ enum HomeInfrastructureParser{
             guard pair.count==2 else{return nil}
             return(String(pair[0]),String(pair[1]))
         })
+        let xhttpService=Dictionary(uniqueKeysWithValues:(sections["XRAY_XHTTP_SERVICE"] ?? "").split(separator:"\n").compactMap{line->(String,String)? in
+            let pair=line.split(separator:"=",maxSplits:1,omittingEmptySubsequences:false)
+            guard pair.count==2 else{return nil}
+            return(String(pair[0]),String(pair[1]))
+        })
+        let xhttpTLSService=Dictionary(uniqueKeysWithValues:(sections["XRAY_XHTTP_TLS_SERVICE"] ?? "").split(separator:"\n").compactMap{line->(String,String)? in
+            let pair=line.split(separator:"=",maxSplits:1,omittingEmptySubsequences:false)
+            guard pair.count==2 else{return nil}
+            return(String(pair[0]),String(pair[1]))
+        })
         let listening = !(sections["XRAY_LISTENER"] ?? "").isEmpty
         let loaded=service["LoadState"]=="loaded"
         let active=service["ActiveState"]=="active" && service["SubState"]=="running"
+        let xhttpListening = !(sections["XRAY_XHTTP_LISTENER"] ?? "").isEmpty
+        let xhttpInstalled=xhttpService["LoadState"]=="loaded"
+        let xhttpActive=xhttpService["ActiveState"]=="active" && xhttpService["SubState"]=="running"
+        let xhttpState:HealthState = !commandSucceeded ? .unknown : (!xhttpInstalled ? .unknown : (xhttpActive && xhttpListening ? .online:.warning))
+        let xhttpTLSListening = !(sections["XRAY_XHTTP_TLS_LISTENER"] ?? "").isEmpty
+        let xhttpTLSRoute = (sections["XRAY_XHTTP_TLS_ROUTE"] ?? "").trimmingCharacters(in:.whitespacesAndNewlines) == "configured"
+        let xhttpTLSCaddyReady = (sections["XRAY_XHTTP_TLS_CADDY"] ?? "").trimmingCharacters(in:.whitespacesAndNewlines) == "ready"
+        let xhttpTLSInstalled=xhttpTLSService["LoadState"]=="loaded"
+        let xhttpTLSActive=xhttpTLSService["ActiveState"]=="active" && xhttpTLSService["SubState"]=="running"
+        let xhttpTLSState:HealthState = !commandSucceeded ? .unknown : (!xhttpTLSInstalled ? .unknown : (xhttpTLSActive && xhttpTLSListening && xhttpTLSRoute && xhttpTLSCaddyReady ? .online:.warning))
         let nftLines=(sections["NFT_HINTS"] ?? "").split(separator:"\n").map(String.init)
         let uid=xrayUID?.trimmingCharacters(in:.whitespacesAndNewlines)
         let xrayPolicyLines=uid.map{value in nftLines.filter{$0.range(of:#"\bskuid\s+\#(value)\b"#,options:.regularExpression) != nil}} ?? []
@@ -159,7 +184,7 @@ enum HomeInfrastructureParser{
             return String(line[range])
         }.first
         let xrayEgress=xrayMark.flatMap{mark in policies.first(where:{$0.mark?.lowercased()==mark.lowercased()})?.interface}
-        let xray=XrayServiceSnapshot(state:!commandSucceeded ? .unknown:(loaded && active && listening ? .online:.warning),enabled:service["UnitFileState"].map{$0=="enabled"},tcpPort:8443,listening:commandSucceeded ? listening:nil,egressMark:xrayMark,egressInterface:xrayEgress,observedAt:commandSucceeded ? now:nil,evidence:commandSucceeded ? "Read-only systemd, listener and process-policy discovery":nil)
+        let xray=XrayServiceSnapshot(state:!commandSucceeded ? .unknown:(loaded && active && listening ? .online:.warning),enabled:service["UnitFileState"].map{$0=="enabled"},tcpPort:8443,listening:commandSucceeded ? listening:nil,xhttpState:xhttpState,xhttpEnabled:xhttpService["UnitFileState"].map{$0=="enabled"},xhttpListening:commandSucceeded && xhttpService["LoadState"] != nil ? xhttpListening:nil,xhttpTLSState:xhttpTLSState,xhttpTLSEnabled:xhttpTLSService["UnitFileState"].map{$0=="enabled"},xhttpTLSListening:commandSucceeded && xhttpTLSService["LoadState"] != nil ? xhttpTLSListening:nil,xhttpTLSRoute:commandSucceeded && xhttpTLSService["LoadState"] != nil ? xhttpTLSRoute:nil,xhttpTLSCaddyReady:commandSucceeded && xhttpTLSService["LoadState"] != nil ? xhttpTLSCaddyReady:nil,egressMark:xrayMark,egressInterface:xrayEgress,observedAt:commandSucceeded ? now:nil,evidence:commandSucceeded ? "Read-only systemd, listener, Caddy route/TLS listener and process-policy discovery":nil)
         return VPSResult(policy:policy,tunnels:tunnels,xray:xray)
     }
 

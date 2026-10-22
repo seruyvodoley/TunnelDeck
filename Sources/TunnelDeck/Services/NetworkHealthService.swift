@@ -32,6 +32,18 @@ struct NetworkHealthSnapshot: Sendable {
         let https = sections["HTTPS"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let xray = keyValues(sections["XRAY"] ?? "")
         let xrayListener = firstLine(sections["XRAY_LISTENER"])
+        let xhttp = keyValues(sections["XHTTP_SERVICE"] ?? "")
+        let xhttpListener = firstLine(sections["XHTTP_LISTENER"])
+        let xhttpInstalled = xhttp["LoadState"] == "loaded"
+        let xhttpActive = xhttp["ActiveState"] == "active" && xhttp["SubState"] == "running"
+        let xhttpState: NetworkProbeState = !xhttpInstalled ? .unknown : (xhttpActive && !xhttpListener.isEmpty ? .passed:.warning)
+        let xhttpTLS = keyValues(sections["XHTTP_TLS_SERVICE"] ?? "")
+        let xhttpTLSListener = firstLine(sections["XHTTP_TLS_LISTENER"])
+        let xhttpTLSRoute = firstLine(sections["XHTTP_TLS_CADDY_ROUTE"]) == "configured"
+        let xhttpTLSCaddyReady = firstLine(sections["XHTTP_TLS_CADDY"]) == "ready"
+        let xhttpTLSInstalled = xhttpTLS["LoadState"] == "loaded"
+        let xhttpTLSActive = xhttpTLS["ActiveState"] == "active" && xhttpTLS["SubState"] == "running"
+        let xhttpTLSState: NetworkProbeState = !xhttpTLSInstalled ? .unknown : (xhttpTLSActive && !xhttpTLSListener.isEmpty && xhttpTLSRoute && xhttpTLSCaddyReady ? .passed:.warning)
         let caddy = sections["CADDY_CONTAINER"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let resources = (sections["RESOURCES"] ?? "").replacingOccurrences(of: "\n", with: " · ")
         let resourceValues = keyValues(sections["RESOURCES"] ?? "")
@@ -55,6 +67,10 @@ struct NetworkHealthSnapshot: Sendable {
                         detail: https.isEmpty ? "HTTPS probe returned no result" : https),
             NetworkProbe(id: "xray", title: "Xray server", state: xray["ActiveState"] == "active" && xray["SubState"] == "running" && !xrayListener.isEmpty ? .passed : .warning,
                         detail: "systemd=\(xray["ActiveState"] ?? "unknown")/\(xray["SubState"] ?? "unknown"); listener=\(xrayListener.isEmpty ? "not observed" : xrayListener). Server readiness does not prove a client REALITY session."),
+            NetworkProbe(id: "xhttp", title: "Xray XHTTP REALITY fallback", state: xhttpState,
+                        detail: xhttpInstalled ? "systemd=\(xhttp["ActiveState"] ?? "unknown")/\(xhttp["SubState"] ?? "unknown"); listener=\(xhttpListener.isEmpty ? "not observed" : xhttpListener)" : "Secondary XHTTP transport is not configured"),
+            NetworkProbe(id: "xhttp-tls", title: "XHTTP through Caddy TLS :443", state: xhttpTLSState,
+                        detail: xhttpTLSInstalled ? "systemd=\(xhttpTLS["ActiveState"] ?? "unknown")/\(xhttpTLS["SubState"] ?? "unknown"); loopback=\(xhttpTLSListener.isEmpty ? "not observed" : xhttpTLSListener); Caddy route=\(xhttpTLSRoute ? "configured" : "not observed"); Caddy TLS=\(xhttpTLSCaddyReady ? "ready" : "not ready")" : "TLS-fronted XHTTP is not configured"),
             NetworkProbe(id: "caddy", title: "Caddy HTTPS container", state: caddy.hasPrefix("running|") ? .passed : .warning,
                         detail: caddy.isEmpty ? "Container ma-alice-https was not found" : "ma-alice-https state/restart policy: \(caddy)"),
             NetworkProbe(id: "resources", title: "VPS resource headroom", state: resourceState,

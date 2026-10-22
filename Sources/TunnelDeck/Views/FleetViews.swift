@@ -90,12 +90,24 @@ struct TopologyView: View {
                     ])
                 }
 
-                topologySection("VLESS + REALITY","TunnelDeck monitors the server. It does not start a client tunnel; use a VLESS + REALITY client with the private profile. Client sessions are not exposed by the current Xray telemetry.") {
+                topologySection("VLESS + REALITY","Two server transports are monitored independently. TunnelDeck does not start client tunnels; use the matching private profile. Client sessions are not exposed by server telemetry.") {
                     flowLine(.service,label:"VLESS/TCP",nodes:[
                         Node("Remote VLESS client",.unknown,"Active client session is not observable here"),
                         Node("Xray · REALITY",model.homeInfrastructure.xrayService.state,xrayDetail),
                         model.homeInfrastructure.xrayService.observedAt == nil ? Node("Policy egress",.unknown,"Waiting for VPS discovery") : xrayEgressNode,
                         Node("External egress",.unknown,"Not probed end to end")
+                    ])
+                    flowLine(.service,label:"VLESS/XHTTP",nodes:[
+                        Node("Remote XHTTP client",.unknown,"Use the XHTTP profile"),
+                        Node("Xray · XHTTP + REALITY",model.homeInfrastructure.xrayService.xhttpState,xhttpDetail),
+                        model.homeInfrastructure.xrayService.observedAt == nil ? Node("Policy egress",.unknown,"Waiting for VPS discovery") : xrayEgressNode,
+                        Node("External egress",.unknown,"Client transfer not measured by topology discovery")
+                    ])
+                    flowLine(.service,label:"VLESS/XHTTP over HTTPS",nodes:[
+                        Node("Remote HTTPS client",.unknown,"Use the TLS-fronted XHTTP profile"),
+                        Node("Caddy TLS · TCP 443",model.homeInfrastructure.xrayService.xhttpTLSState,xhttpTLSDetail),
+                        Node("Xray · loopback :2054",model.homeInfrastructure.xrayService.xhttpTLSState,"Private upstream; not exposed as a public listener"),
+                        model.homeInfrastructure.xrayService.observedAt == nil ? Node("Policy egress",.unknown,"Waiting for VPS discovery") : xrayEgressNode
                     ])
                 }
 
@@ -117,6 +129,7 @@ struct TopologyView: View {
                     }
                     if model.homeInfrastructure.xrayService.observedAt != nil {
                         nodeView(Node("Xray · REALITY",model.homeInfrastructure.xrayService.state,xrayDetail))
+                        nodeView(Node("XHTTP through Caddy TLS",model.homeInfrastructure.xrayService.xhttpTLSState,xhttpTLSDetail))
                     }
                 }
 
@@ -265,6 +278,22 @@ struct TopologyView: View {
         let enabled=service.enabled == true ? "enabled":"enabled state unknown"
         let listener=service.listening == true ? "TCP \(service.tcpPort) listening":"TCP \(service.tcpPort) not confirmed"
         return "systemd \(service.state.rawValue) · \(enabled) · \(listener)"
+    }
+
+    private var xhttpDetail:String{
+        let service=model.homeInfrastructure.xrayService
+        let enabled=service.xhttpEnabled == true ? "enabled":"enabled state unknown"
+        let listener=service.xhttpListening == true ? "TCP \(service.xhttpTCPPort) listening":"TCP \(service.xhttpTCPPort) not confirmed"
+        return "systemd \(service.xhttpState.rawValue) · \(enabled) · \(listener)"
+    }
+
+    private var xhttpTLSDetail:String{
+        let service=model.homeInfrastructure.xrayService
+        let enabled=service.xhttpTLSEnabled == true ? "enabled":"enabled state unknown"
+        let listener=service.xhttpTLSListening == true ? "loopback :\(service.xhttpTLSLocalPort) listening":"loopback listener not confirmed"
+        let route=service.xhttpTLSRoute == true ? "Caddy path configured":"Caddy path not observed"
+        let caddy=service.xhttpTLSCaddyReady == true ? "Caddy :443 ready":"Caddy :443 not confirmed"
+        return "systemd \(service.xhttpTLSState.rawValue) · \(enabled) · HTTPS :443 → \(listener) · \(route) · \(caddy)"
     }
 
     private var directReachabilityDetail:String{

@@ -600,6 +600,8 @@ struct RouterView: View {
                         KeyValueRow(key:"AmneziaWG",value:gateway.foreignInterface?.localizedCaseInsensitiveContains("awg") == true ? (activeTunnel?.state.rawValue.capitalized ?? "Observed") : "Not selected by the discovered route")
                         KeyValueRow(key:"Client core on Xiaomi (audit only)",value:realityClientLabel(xrayInstalled:gateway.xrayClientInstalled,xrayRunning:gateway.xrayClientRunning,singBoxInstalled:gateway.singBoxClientInstalled,singBoxRunning:gateway.singBoxClientRunning))
                         KeyValueRow(key:"VPS Xray server",value:model.homeInfrastructure.xrayService.state == .online ? "Active · TCP \(model.homeInfrastructure.xrayService.tcpPort)" : model.homeInfrastructure.xrayService.state.rawValue.capitalized)
+                        KeyValueRow(key:"VPS XHTTP fallback",value:model.homeInfrastructure.xrayService.xhttpState == .online ? "Active · TCP \(model.homeInfrastructure.xrayService.xhttpTCPPort)" : model.homeInfrastructure.xrayService.xhttpState.rawValue.capitalized)
+                        KeyValueRow(key:"HTTPS XHTTP transport",value:model.homeInfrastructure.xrayService.xhttpTLSState == .online ? "Active · Caddy TCP 443 → loopback \(model.homeInfrastructure.xrayService.xhttpTLSLocalPort)" : model.homeInfrastructure.xrayService.xhttpTLSState.rawValue.capitalized)
                         KeyValueRow(key:"CPU / RAM",value:"\(gateway.cpuModel ?? "Unknown CPU") · \(memoryText(gateway.memoryAvailableKB)) available of \(memoryText(gateway.memoryTotalKB))")
                         KeyValueRow(key:"Overlay free",value:memoryText(gateway.overlayAvailableKB))
                         KeyValueRow(key:"RU address set",value:gateway.ruPrefixCount.map{"\($0) prefixes observed"} ?? "Unknown")
@@ -626,6 +628,10 @@ struct RouterView: View {
                         HStack { StatusDot(state:xray.state); Text(xray.state == .online ? "Xray active":"Xray status").font(.headline); Spacer() }
                         KeyValueRow(key:"Autostart",value:xray.enabled.map{$0 ? "Enabled":"Disabled"} ?? "Unknown")
                         KeyValueRow(key:"TCP listener",value:xray.listening.map{$0 ? "Listening on :\(xray.tcpPort)":"Unavailable"} ?? "Unknown")
+                        KeyValueRow(key:"XHTTP + REALITY",value:xray.xhttpState == .unknown ? "Not discovered" : xray.xhttpState == .online ? "Active" : "Warning")
+                        KeyValueRow(key:"XHTTP autostart",value:xray.xhttpEnabled.map{$0 ? "Enabled":"Disabled"} ?? "Unknown")
+                        KeyValueRow(key:"XHTTP listener",value:xray.xhttpListening.map{$0 ? "Listening on :\(xray.xhttpTCPPort)":"Unavailable"} ?? "Unknown")
+                        KeyValueRow(key:"HTTPS XHTTP",value:xray.xhttpTLSState == .unknown ? "Not discovered" : xray.xhttpTLSState == .online ? "Caddy :443 → loopback :\(xray.xhttpTLSLocalPort)" : "Warning")
                         KeyValueRow(key:"Observed",value:xray.observedAt?.formatted(.relative(presentation:.numeric)) ?? "Not confirmed")
                         Text("Transport status only. Exit routing is reported separately by RU policy and tunnel status.").font(.caption).foregroundStyle(.secondary).frame(maxWidth:.infinity,alignment:.leading)
                     }

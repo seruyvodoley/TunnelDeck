@@ -1,0 +1,12 @@
+# Add before the existing catch-all handle in /root/ma-voice-https/Caddyfile.
+@tunneldeck_xhttp {
+    path /api/v3/updates*
+}
+handle @tunneldeck_xhttp {
+    reverse_proxy 127.0.0.1:2054 {
+        flush_interval -1
+        transport http {
+            versions h2c 2
+        }
+    }
+}

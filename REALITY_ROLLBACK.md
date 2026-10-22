@@ -6,6 +6,24 @@ The pre-change host/network snapshot is root-only at:
 
 It includes `iptables-save`, `ip6tables-save`, `ipset save`, routes/rules, original TunnelDeck firewall and RU-route scripts/units, and the warning-level Xray config used for this deployment. Do not apply the full `iptables.v4` snapshot with `iptables-restore` on a live host; that would replace unrelated firewall changes made since the snapshot.
 
+## Remove only the secondary XHTTP transport
+
+The additive XHTTP deployment has its own root-only snapshot and rollback script at `/root/tunneldeck-backups/reality-20261023-xhttp`. To remove only that fallback while preserving the original 8443 Xray service, policy rules, tunnels, and Caddy:
+
+```sh
+/root/tunneldeck-backups/reality-20261023-xhttp/rollback-xhttp.sh
+```
+
+The Caddy TLS-fronted XHTTP path has a separate root-only snapshot and rollback script at `/root/tunneldeck-backups/reality-20261023-caddy-xhttp`. To remove only the TCP/443 XHTTP path and its loopback-only service:
+
+```sh
+/root/tunneldeck-backups/reality-20261023-caddy-xhttp/rollback-caddy-xhttp.sh
+```
+
+This restores the saved Caddyfile and gracefully reloads the existing Caddy container, then removes only `tunneldeck-xray-xhttp-tls.service` and `/usr/local/etc/xray/xhttp-tls.json`. It does not change Caddy port 443, its webhook path, the 8443 or 2053 Xray services, firewall rules, tunnels, or routing policy.
+
+The script stops and disables only `tunneldeck-xray-xhttp.service`, removes only the TCP/2053 firewall allow and matching persistent firewall line, and deletes only its unit, config, and separate Xray binary. It does not touch `xray.service`, the 8443 listener, Xray policy, `wg0`, `homeexit`, `awgtd0`, `awgfriend0`, route tables, or Caddy. Device profiles remain in the protected backup directory so they can be revoked or restored separately.
+
 To remove only the REALITY additions while keeping WireGuard, AmneziaWG, Caddy, and existing route rules in place:
 
 ```sh

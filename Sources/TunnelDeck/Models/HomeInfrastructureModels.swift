@@ -77,6 +77,16 @@ struct XrayServiceSnapshot:Sendable,Equatable{
     var enabled:Bool?
     var tcpPort:Int = 8443
     var listening:Bool?
+    var xhttpState:HealthState = .unknown
+    var xhttpEnabled:Bool?
+    var xhttpTCPPort:Int = 2053
+    var xhttpListening:Bool?
+    var xhttpTLSState:HealthState = .unknown
+    var xhttpTLSEnabled:Bool?
+    var xhttpTLSListening:Bool?
+    var xhttpTLSRoute:Bool?
+    var xhttpTLSCaddyReady:Bool?
+    var xhttpTLSLocalPort:Int = 2054
     var egressMark:String?
     var egressInterface:String?
     var observedAt:Date?

@@ -211,11 +211,39 @@ import Testing
     SubState=running
     __TD_XRAY_LISTENER__
     LISTEN 0 4096 *:8443
+    __TD_XRAY_XHTTP_SERVICE__
+    LoadState=loaded
+    UnitFileState=enabled
+    ActiveState=active
+    SubState=running
+    __TD_XRAY_XHTTP_LISTENER__
+    LISTEN 0 4096 *:2053
+    __TD_XRAY_XHTTP_TLS_SERVICE__
+    LoadState=loaded
+    UnitFileState=enabled
+    ActiveState=active
+    SubState=running
+    __TD_XRAY_XHTTP_TLS_LISTENER__
+    LISTEN 0 4096 127.0.0.1:2054
+    __TD_XRAY_XHTTP_TLS_ROUTE__
+    configured
+    __TD_XRAY_XHTTP_TLS_CADDY__
+    ready
     """
     let parsed=HomeInfrastructureParser.vps(text,commandSucceeded:true,now:now,handshakeTimeout:180)
     #expect(parsed.xray.state == .online)
     #expect(parsed.xray.enabled == true)
     #expect(parsed.xray.tcpPort == 8443)
     #expect(parsed.xray.listening == true)
+    #expect(parsed.xray.xhttpState == .online)
+    #expect(parsed.xray.xhttpEnabled == true)
+    #expect(parsed.xray.xhttpTCPPort == 2053)
+    #expect(parsed.xray.xhttpListening == true)
+    #expect(parsed.xray.xhttpTLSState == .online)
+    #expect(parsed.xray.xhttpTLSEnabled == true)
+    #expect(parsed.xray.xhttpTLSListening == true)
+    #expect(parsed.xray.xhttpTLSRoute == true)
+    #expect(parsed.xray.xhttpTLSCaddyReady == true)
+    #expect(parsed.xray.xhttpTLSLocalPort == 2054)
     #expect(parsed.xray.observedAt == now)
 }

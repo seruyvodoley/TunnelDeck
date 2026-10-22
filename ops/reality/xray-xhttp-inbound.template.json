@@ -1,0 +1,39 @@
+{
+  "tag": "vless-xhttp-reality-in",
+  "listen": "0.0.0.0",
+  "port": 2053,
+  "protocol": "vless",
+  "settings": {
+    "clients": [
+      { "id": "REPLACE_WITH_DEVICE_UUID", "email": "device-name" }
+    ],
+    "decryption": "none"
+  },
+  "streamSettings": {
+    "network": "xhttp",
+    "xhttpSettings": {
+      "mode": "auto",
+      "path": "/api/v3/updates"
+    },
+    "security": "reality",
+    "realitySettings": {
+      "show": false,
+      "target": "www.wikipedia.org:443",
+      "xver": 0,
+      "serverNames": ["www.wikipedia.org"],
+      "privateKey": "REPLACE_WITH_SERVER_PRIVATE_KEY",
+      "shortIds": ["REPLACE_WITH_16_HEX_CHAR_SHORT_ID"],
+      "maxTimeDiff": 300000,
+      "limitFallbackUpload": {
+        "afterBytes": 1048576,
+        "bytesPerSec": 65536,
+        "burstBytesPerSec": 131072
+      },
+      "limitFallbackDownload": {
+        "afterBytes": 1048576,
+        "bytesPerSec": 65536,
+        "burstBytesPerSec": 131072
+      }
+    }
+  }
+}

@@ -21,6 +21,22 @@ import Testing
     SubState=running
     __TD_XRAY_LISTENER__
     LISTEN 0 4096 *:8443
+    __TD_XHTTP_SERVICE__
+    LoadState=loaded
+    ActiveState=active
+    SubState=running
+    __TD_XHTTP_LISTENER__
+    LISTEN 0 4096 *:2053
+    __TD_XHTTP_TLS_SERVICE__
+    LoadState=loaded
+    ActiveState=active
+    SubState=running
+    __TD_XHTTP_TLS_LISTENER__
+    LISTEN 0 4096 127.0.0.1:2054
+    __TD_XHTTP_TLS_CADDY_ROUTE__
+    configured
+    __TD_XHTTP_TLS_CADDY__
+    ready
     __TD_CADDY_CONTAINER__
     running|unless-stopped
     __TD_RESOURCES__
@@ -35,6 +51,8 @@ import Testing
     #expect(snapshot.probes.first(where: { $0.id == "ru-policy" })?.state == .passed)
     #expect(snapshot.probes.first(where: { $0.id == "https" })?.state == .passed)
     #expect(snapshot.probes.first(where: { $0.id == "xray" })?.state == .passed)
+    #expect(snapshot.probes.first(where: { $0.id == "xhttp" })?.state == .passed)
+    #expect(snapshot.probes.first(where: { $0.id == "xhttp-tls" })?.state == .passed)
     #expect(snapshot.probes.first(where: { $0.id == "caddy" })?.state == .passed)
     #expect(snapshot.probes.first(where: { $0.id == "resources" })?.state == .warning)
     #expect(snapshot.probes.first(where: { $0.id == "xray" })?.detail.contains("does not prove a client REALITY session") == true)
@@ -64,7 +82,28 @@ import Testing
     #expect(snapshot.probes.first(where: { $0.id == "dns" })?.state == .failed)
     #expect(snapshot.probes.first(where: { $0.id == "https" })?.state == .failed)
     #expect(snapshot.probes.first(where: { $0.id == "xray" })?.state == .warning)
+    #expect(snapshot.probes.first(where: { $0.id == "xhttp" })?.state == .unknown)
+    #expect(snapshot.probes.first(where: { $0.id == "xhttp-tls" })?.state == .unknown)
     #expect(snapshot.probes.first(where: { $0.id == "caddy" })?.state == .warning)
+}
+
+@Test func tlsFrontedXHTTPRequiresTheRealCaddy443Listener() {
+    let output = """
+    __TD_HOST__
+    primary-vps
+    __TD_XHTTP_TLS_SERVICE__
+    LoadState=loaded
+    ActiveState=active
+    SubState=running
+    __TD_XHTTP_TLS_LISTENER__
+    LISTEN 0 4096 127.0.0.1:2054
+    __TD_XHTTP_TLS_CADDY_ROUTE__
+    configured
+    __TD_XHTTP_TLS_CADDY__
+    unavailable
+    """
+    let snapshot = NetworkHealthSnapshot.parse(output, succeeded: true)
+    #expect(snapshot.probes.first(where: { $0.id == "xhttp-tls" })?.state == .warning)
 }
 
 @Test func networkHealthSSHFailureIsExplicitAndUnknownEvidenceIsNotGreen() {

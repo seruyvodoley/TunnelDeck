@@ -11,6 +11,8 @@
 - Missing SSH, route, rule, handshake or nftables evidence stays Unknown rather than being synthesized as Online.
 - Home infrastructure discovery reuses the existing SSH safety boundary. It prefers ~/.ssh/tunneldeck_openwrt_rsa for OpenWrt when present and retains the last successfully confirmed OpenWrt host for remote tdhome access.
 - Diagnostics includes a manual, read-only VPS Network Health probe for the default route, RU-mark route lookup, DNS, HTTPS/TLS, Xray listener, Docker-hosted Caddy, and VPS resource headroom. Results are retained in local diagnostic history.
+- Topology and VPS Network Health report the primary VLESS + REALITY listener and the independent XHTTP + REALITY fallback separately. A green server listener does not imply a home-device tunnel or client session.
+- The XHTTP fallback also has a Caddy-fronted TLS entry on the existing TCP/443 certificate, reverse-proxied to a loopback-only Xray service. TunnelDeck checks the service, local listener, and configured Caddy route independently; this transport is ordinary TLS, not REALITY.
 - Server-side route lookup and service checks are reported as evidence for those checks only; they do not claim a home-device path or an active VLESS + REALITY client session. See [the network audit](NETWORK_OPTIMIZATION_REPORT.md) and [the user guide](TUNNELDECK_NETWORK_GUIDE.md).
 
 
@@ -152,7 +154,7 @@ TunnelDeck invokes `/usr/bin/ssh` with `IdentitiesOnly=yes`, batch authenticatio
 
 ## Network Health and Diagnostics
 
-Open **Diagnostics** and run **VPS Network Health** for a bounded read-only check from the configured VPS. TunnelDeck checks its main route, performs a lookup for a Russian destination with the existing `0x67` policy mark, resolves a test DNS name, makes one short HTTPS/TLS request, inspects Xray's unit/listener and the configured Caddy Docker container, and reports available RAM and disk headroom. Each run appears in diagnostic history.
+Open **Diagnostics** and run **VPS Network Health** for a bounded read-only check from the configured VPS. TunnelDeck checks its main route, performs a lookup for a Russian destination with the existing `0x67` policy mark, resolves a test DNS name, makes one short HTTPS/TLS request, inspects the VLESS + REALITY listener, both XHTTP services, the local Caddy TLS route and the configured Caddy Docker container, and reports available RAM and disk headroom. Each run appears in diagnostic history.
 
 The route lookup does not send a test packet through the selected route. VPS-side results do not confirm Xiaomi forwarding, per-device policy, DNS/IPv6 leak behavior, or a live VLESS + REALITY client session. Use **DNS Path Test** for resolver comparison from the Mac; verify a home-device route separately before changing network policy. This diagnostic button never changes routes or restarts services.
 
